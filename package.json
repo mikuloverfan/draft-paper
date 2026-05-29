@@ -1,0 +1,19 @@
+{
+  "name": "obsidian-draft-paper",
+  "version": "1.0.0",
+  "description": "Obsidian plugin for freehand drafting on top of Markdown documents.",
+  "main": "main.js",
+  "scripts": {
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs"
+  },
+  "dependencies": {
+    "obsidian": "latest",
+    "perfect-freehand": "^1.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.19.0",
+    "typescript": "^5.0.0"
+  }
+}

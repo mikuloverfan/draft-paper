@@ -1,0 +1,10 @@
+{
+  "id": "draft-paper",
+  "name": "Draft Paper",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "提供全屏草稿纸覆盖层，可在 Markdown 文档上自由手写标注，绘制内容绑定文档滚动坐标，不受 DOM 变化影响。",
+  "author": "Your Name",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
