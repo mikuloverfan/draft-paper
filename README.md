@@ -1,10 +1,10 @@
 # 📝 Draft Paper
 
-[English Summary](#english-summary) | [中文说明](#中文说明-draft-paper)
+[English](#english) | [中文说明](#中文说明-draft-paper)
 
 ---
 
-## English Summary
+## English
 
 **An open-source Obsidian plugin for full-screen hand-drawn sketches, annotations, and drawings directly over your Markdown documents.**
 
@@ -15,6 +15,47 @@ Draft Paper provides a full-screen transparent canvas layer in Reading Mode. It 
 - **Customizable Tools:** Color picker, stroke width, and opacity controls.
 - **Stroke Eraser:** A real eraser that removes parts of paths.
 - **Text & Elements:** Move, delete, or scale text and drawing elements freely.
+- **Multiple Arrow Styles:** Straight, curved, dashed, and double-headed arrows.
+- **Undo & Selection:** Ctrl+Z to undo, drag-select to move or delete elements.
+- **File-level Isolation:** Each Markdown file has its own `draft-paper/filename.json`, ensuring privacy and easy sync.
+
+### Installation
+
+#### From Obsidian Community Plugins (Coming Soon)
+> Currently under review. Please use manual installation below.
+
+#### Manual Installation
+1. Download the latest `main.js`, `manifest.json`, and `styles.css` from the [Releases page](https://github.com/mikuloverfan/draft-paper/releases).
+2. Create a folder named `draft-paper` inside your vault's `.obsidian/plugins/` directory.
+3. Place the three downloaded files into the `draft-paper` folder.
+4. Reload Obsidian, then go to **Settings → Community Plugins** and enable **Draft Paper**.
+
+### Usage
+
+#### Getting Started
+1. Open any Markdown file and ensure you are in **Reading Mode** (the plugin will switch automatically).
+2. **Launch Draft Paper:** Click the pencil icon in the left ribbon, or run the command `Toggle Draft Mode` from the command palette (`Ctrl/Cmd + P`).
+3. **Select a Tool** from the bottom toolbar:
+   - `✏️` **Pen** — Freehand drawing
+   - `🧹` **Eraser** — Partial stroke eraser
+   - `⬜` **Select** — Drag to select elements, then move or delete them
+   - `↗` **Arrow** — Draw arrows (press `←` `→` to switch styles)
+   - `⬛` **Rectangle** — Draw rectangle frames
+   - `T` **Text** — Click or double-click to add text
+4. **Adjust Settings:** Use the color picker, stroke width slider, and opacity slider on the right side of the toolbar.
+5. **Exit:** Click the ❌ button, press `Esc` (when no element is selected), or click the ribbon icon again.
+6. **Auto-save:** Draft data is automatically saved to a `draft-paper/` folder next to your Markdown file.
+
+#### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `1` ~ `6` | Switch tools (Pen/Eraser/Select/Arrow/Rectangle/Text) |
+| `E` | Toggle between Pen and Eraser |
+| `←` `→` | Switch arrow style (when Arrow tool is active) |
+| `Ctrl+Z` | Undo |
+| `Delete / Backspace` | Delete selected elements |
+| `Esc` | Deselect / Exit draft mode |
 
 ---
 
