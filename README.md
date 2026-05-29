@@ -1,6 +1,6 @@
 # 📝 Draft Paper
 
-[English](#english) | [中文说明](#中文说明-draft-paper)
+English(#english) | 中文说明(#中文说明-draft-paper)
 
 ---
 
@@ -25,7 +25,7 @@ Draft Paper provides a full-screen transparent canvas layer in Reading Mode. It 
 > Currently under review. Please use manual installation below.
 
 #### Manual Installation
-1. Download the latest `main.js`, `manifest.json`, and `styles.css` from the [Releases page](https://github.com/mikuloverfan/draft-paper/releases).
+1. Download the latest `main.js`, `manifest.json`, and `styles.css` from the Releases page(https://github.com/mikuloverfan/draft-paper/releases).
 2. Create a folder named `draft-paper` inside your vault's `.obsidian/plugins/` directory.
 3. Place the three downloaded files into the `draft-paper` folder.
 4. Reload Obsidian, then go to **Settings → Community Plugins** and enable **Draft Paper**.
@@ -90,7 +90,7 @@ Draft Paper 是一款为 Obsidian 打造的「全局草稿纸」插件。它在�
 
 ## 📥 安装
 
-### 方法一：从 Obsidian 社区商店安装（待上架）
+### 方法一：从 Obsidian 社区商店安装
 
 > 目前正在审核中，可直接通过以下方式手动安装。
 
@@ -149,8 +149,8 @@ your-notes/
 
 ## 🛠️ 技术栈
 
-- [TypeScript](https://www.typescriptlang.org/) / [Obsidian API](https://docs.obsidian.md/)
-- [perfect-freehand](https://github.com/steveruizok/perfect-freehand) — 轮廓渲染引擎
+- TypeScript(https://www.typescriptlang.org/) / Obsidian API(https://docs.obsidian.md/)
+- perfect-freehand(https://github.com/steveruizok/perfect-freehand) — 轮廓渲染引擎
 - HTML5 Canvas — 绘图核心
 
 ---
@@ -159,7 +159,7 @@ your-notes/
 
 欢迎任何形式的贡献！包括但不限于：
 
-- 提交 Bug 或功能建议（[Issues](https://github.com/mikuloverfan/draft-paper/issues)）
+- 提交 Bug 或功能建议（Issues(https://github.com/mikuloverfan/draft-paper/issues)）
 - 代码合并请求
 - 文档改进
 
@@ -169,11 +169,11 @@ your-notes/
 
 ## 📄 许可证
 
-[MIT](LICENSE)
+MIT License
 
 ---
 
 ## 💖 致谢
 
-- 感谢 [tldraw](https://tldraw.com/) 和 [Excalidraw](https://excalidraw.com/) 的开源精神，Draft Paper 的笔迹渲染算法深受其启发。
+- 感谢 tldraw(https://tldraw.com/) 和 Excalidraw(https://excalidraw.com/) 的开源精神，Draft Paper 的笔迹渲染算法深受其启发。
 - 感谢 Obsidian 社区提供的优秀插件生态。
