@@ -1,82 +1,149 @@
+/* ============================================================
+   Draft Paper v10 - 完整样式表
+   ============================================================ */
+
+/* ---------- Overlay（仅包含 canvas） ---------- */
 .draft-paper-overlay {
-    position: fixed; top: 0; left: 0;
-    width: 100vw; height: 100vh;
-    z-index: 9999; pointer-events: auto;
-    touch-action: none; background: transparent;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 9999;
+    pointer-events: auto;          /* 默认 auto，POINTER 模式时由 JS 改为 none */
+    touch-action: none;
+    background: transparent;
 }
+
 .draft-paper-canvas {
-    position: absolute; top: 0; left: 0;
-    outline: none; cursor: crosshair;
+    position: absolute;
+    top: 0;
+    left: 0;
+    outline: none;
+    cursor: crosshair;
 }
+
+/* ---------- 橡皮擦光标（在 overlay 内） ---------- */
 .draft-paper-eraser-cursor {
     position: fixed;
-    border: 2px dashed #ff6666; border-radius: 50%;
-    pointer-events: none; z-index: 10000;
-    background: rgba(255,100,100,0.08);
+    border: 2px dashed #ff6666;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 10000;
+    background: rgba(255, 100, 100, 0.08);
 }
-.draft-paper-toolbar {
-    position: fixed; bottom: 20px; left: 50%;
+
+/* ---------- 工具栏容器（独立于 overlay，挂载在 body） ---------- */
+.draft-paper-toolbar-container {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
     transform: translateX(-50%);
-    display: flex; gap: 8px; align-items: center;
+    z-index: 10001;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    pointer-events: auto;          /* 工具栏永远可交互 */
+}
+
+/* ---------- 工具栏本体 ---------- */
+.draft-paper-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
     padding: 6px 14px;
     background: var(--background-primary);
     border: 1px solid var(--background-modifier-border);
     border-radius: 12px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.13);
-    z-index: 10001; user-select: none;
+    user-select: none;
 }
-.draft-paper-tool-buttons { display: flex; gap: 4px; }
+
+/* ---------- 工具按钮组 ---------- */
+.draft-paper-tool-buttons,
+.draft-paper-mode-buttons {
+    display: flex;
+    gap: 4px;
+}
+
+/* ---------- 按钮通用样式 ---------- */
 .draft-paper-toolbar button {
-    width: 32px; height: 32px; border: none;
-    border-radius: 6px; background: transparent;
-    cursor: pointer; font-size: 16px;
-    display: flex; align-items: center; justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     transition: background 0.15s;
 }
-.draft-paper-toolbar button:hover { background: var(--background-modifier-hover); }
-.draft-paper-toolbar button.active { background: var(--interactive-accent); color: #fff; }
-.draft-paper-tool-settings { display: flex; align-items: center; gap: 6px; }
-.draft-paper-color-picker {
-    width: 24px; height: 24px; border: none;
-    border-radius: 4px; cursor: pointer;
-    background: none; padding: 0;
+
+.draft-paper-toolbar button:hover {
+    background: var(--background-modifier-hover);
 }
-.draft-paper-line-width { width: 60px; cursor: pointer; }
-.draft-paper-line-width-label { font-size: 11px; color: var(--text-muted); min-width: 30px; }
 
+.draft-paper-toolbar button.active {
+    background: var(--interactive-accent);
+    color: #fff;
+}
 
+/* ---------- 设置区域 ---------- */
+.draft-paper-tool-settings {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
 
+.draft-paper-color-picker {
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    background: none;
+    padding: 0;
+}
 
+.draft-paper-line-width,
+.draft-paper-opacity {
+    width: 60px;
+}
 
+.draft-paper-line-width-label,
+.draft-paper-opacity-label,
+.draft-paper-arrow-style {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
 
+/* ---------- 橡皮擦子工具栏（浮在工具栏上方） ---------- */
+.draft-paper-eraser-subtoolbar {
+    display: none;                 /* 默认隐藏，点击橡皮擦按钮时显示 */
+    flex-direction: row;
+    gap: 4px;
+    margin-top: 4px;
+    padding: 4px 8px;
+    background: var(--background-secondary);
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
 
+.draft-paper-eraser-subtoolbar button {
+    padding: 2px 8px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
 
-.draft-paper-overlay { position:fixed; top:0; left:0; width:100vw; height:100vh; z-index:9999; pointer-events:auto; touch-action:none; background:transparent; }
-.draft-paper-canvas { position:absolute; top:0; left:0; outline:none; cursor:crosshair; }
-.draft-paper-eraser-cursor { position:fixed; border:2px dashed #ff6666; border-radius:50%; pointer-events:none; z-index:10000; background:rgba(255,100,100,0.08); }
-.draft-paper-toolbar { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; align-items:center; padding:6px 14px; background:var(--background-primary); border:1px solid var(--background-modifier-border); border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,0.13); z-index:10001; user-select:none; }
-.draft-paper-tool-buttons { display:flex; gap:4px; }
-.draft-paper-toolbar button { width:32px; height:32px; border:none; border-radius:6px; background:transparent; cursor:pointer; font-size:16px; display:flex; align-items:center; justify-content:center; transition:background 0.15s; }
-.draft-paper-toolbar button:hover { background:var(--background-modifier-hover); }
-.draft-paper-toolbar button.active { background:var(--interactive-accent); color:#fff; }
-.draft-paper-tool-settings { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-.draft-paper-color-picker { width:24px; height:24px; border:none; border-radius:4px; cursor:pointer; background:none; padding:0; }
-.draft-paper-line-width { width:60px; }
-.draft-paper-opacity { width:60px; }
-.draft-paper-line-width-label, .draft-paper-opacity-label, .draft-paper-arrow-style { font-size:11px; color:var(--text-muted); white-space:nowrap; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+.draft-paper-eraser-subtoolbar button.active {
+    background: var(--interactive-accent);
+    color: #fff;
+}
