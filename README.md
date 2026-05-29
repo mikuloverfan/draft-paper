@@ -1,5 +1,25 @@
 # 📝 Draft Paper
 
+[English Summary](#english-summary) | [中文说明](#中文说明-draft-paper)
+
+---
+
+## English Summary
+
+**An open-source Obsidian plugin for full-screen hand-drawn sketches, annotations, and drawings directly over your Markdown documents.**
+
+Draft Paper provides a full-screen transparent canvas layer in Reading Mode. It allows you to draw, add arrows, rectangles, and text annotations without affecting your document content. All strokes are bound to the document scroll coordinates and are saved in separate `.json` files.
+
+### Key Features
+- **Smooth Hand-writing:** Powered by `perfect-freehand` for a natural pen-like experience.
+- **Customizable Tools:** Color picker, stroke width, and opacity controls.
+- **Stroke Eraser:** A real eraser that removes parts of paths.
+- **Text & Elements:** Move, delete, or scale text and drawing elements freely.
+
+---
+
+## 中文说明: Draft Paper
+
 **在 Obsidian 文档上自由手写、标注、绘图的开源插件。**
 
 Draft Paper 是一款为 Obsidian 打造的「全局草稿纸」插件。它在阅读模式下提供一个全屏透明画布，让你可以在任何 Markdown 文档上进行自由绘制、箭头标注、矩形框选、文字输入等操作。所有笔迹绑定文档坐标，不受 DOM 变化（如 Callout 折叠、图片加载）影响，并持久化保存为同目录下的独立文件。
@@ -73,8 +93,6 @@ Draft Paper 是一款为 Obsidian 打造的「全局草稿纸」插件。它在�
 ---
 
 ## 📁 数据存储结构
-
-```
 your-notes/
 ├── report.md
 ├── draft-paper/
@@ -83,7 +101,6 @@ your-notes/
 │   ├── day1.md
 │   └── draft-paper/
 │       └── day1.json
-```
 
 - 每个 `.json` 文件独立存储，移动或重命名 `.md` 文件后需手动迁移草稿（未来版本会支持自动跟随）。
 
@@ -101,7 +118,7 @@ your-notes/
 
 欢迎任何形式的贡献！包括但不限于：
 
-- 提交 Bug 或功能建议（[Issues](https://github.com/your-repo/draft-paper/issues)）
+- 提交 Bug 或功能建议（[Issues](https://github.com/mikuloverfan/draft-paper/issues)）
 - 代码合并请求
 - 文档改进
 
