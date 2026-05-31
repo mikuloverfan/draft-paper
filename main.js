@@ -227,6 +227,7 @@ var DEFAULT_LINE_WIDTH = 2.5;
 var HIGHLIGHTER_COLOR = "#ffeb3b";
 var HIGHLIGHTER_OPACITY = 0.25;
 var ERASER_HIT_DISTANCE = 15;
+var PIXEL_ERASER_RADIUS = 16;
 var FREEHAND_OPTIONS = {
   size: 1,
   thinning: 0.6,
@@ -245,6 +246,29 @@ function getBlockKey(el) {
 function dist(a2, b2) {
   return Math.hypot(a2.x - b2.x, a2.y - b2.y);
 }
+function clipStrokeByPixelEraser(stroke, eraserPoints, radius) {
+  const erased = stroke.points.map(
+    (p2) => eraserPoints.some((ep) => dist(p2, ep) < radius)
+  );
+  if (!erased.some(Boolean))
+    return [stroke];
+  const segments = [];
+  let current = [];
+  for (let i2 = 0; i2 < stroke.points.length; i2++) {
+    if (!erased[i2]) {
+      current.push({ ...stroke.points[i2] });
+    } else {
+      if (current.length >= 2) {
+        segments.push({ ...stroke, points: current });
+      }
+      current = [];
+    }
+  }
+  if (current.length >= 2) {
+    segments.push({ ...stroke, points: current });
+  }
+  return segments;
+}
 var DraftPaperPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
@@ -258,10 +282,16 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     __publicField(this, "currentStroke", null);
     __publicField(this, "previewStroke", null);
     __publicField(this, "toolbar", null);
+    __publicField(this, "eraserSubToolbar", null);
+    __publicField(this, "eraserCursorEl", null);
     __publicField(this, "color", DEFAULT_COLOR);
     __publicField(this, "lineWidth", DEFAULT_LINE_WIDTH);
     __publicField(this, "opacity", 1);
     __publicField(this, "arrowStyle", "straight");
+    __publicField(this, "eraserPath", []);
+    __publicField(this, "isErasing", false);
+    __publicField(this, "selectClearRect", null);
+    __publicField(this, "selectClearStart", null);
     __publicField(this, "rafPending", false);
     __publicField(this, "currentFilePath", "");
     __publicField(this, "undoStack", []);
@@ -284,8 +314,13 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       if (this.tool === "eraser") {
         if (this.eraserMode === "stroke") {
           this.eraseAt(block, p2, rect);
-        } else {
-          this.clearAll();
+        } else if (this.eraserMode === "pixel") {
+          this.isErasing = true;
+          this.eraserPath = [p2];
+          this.applyPixelEraser();
+        } else if (this.eraserMode === "select-clear") {
+          this.selectClearStart = p2;
+          this.selectClearRect = { x1: p2.x, y1: p2.y, x2: p2.x, y2: p2.y };
         }
         return;
       }
@@ -325,8 +360,24 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
         return;
       const rect = block.getBoundingClientRect();
       const p2 = { x: e2.clientX - rect.left, y: e2.clientY - rect.top };
-      if (this.tool === "eraser" && this.eraserMode === "stroke" && e2.buttons === 1) {
-        this.eraseAt(block, p2, rect);
+      if (this.tool === "eraser" && this.eraserMode === "pixel" && this.eraserCursorEl) {
+        const size = PIXEL_ERASER_RADIUS * 2;
+        this.eraserCursorEl.style.left = `${e2.clientX - PIXEL_ERASER_RADIUS}px`;
+        this.eraserCursorEl.style.top = `${e2.clientY - PIXEL_ERASER_RADIUS}px`;
+        this.eraserCursorEl.style.width = `${size}px`;
+        this.eraserCursorEl.style.height = `${size}px`;
+      }
+      if (this.tool === "eraser") {
+        if (this.eraserMode === "stroke" && e2.buttons === 1) {
+          this.eraseAt(block, p2, rect);
+        } else if (this.eraserMode === "pixel" && this.isErasing) {
+          this.eraserPath.push(p2);
+          this.applyPixelEraser();
+        } else if (this.eraserMode === "select-clear" && this.selectClearRect) {
+          this.selectClearRect.x2 = p2.x;
+          this.selectClearRect.y2 = p2.y;
+          this.scheduleRedraw();
+        }
         return;
       }
       if (this.previewStroke) {
@@ -353,6 +404,21 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     __publicField(this, "onPointerUp", () => {
       if (!this.active || !this.isDrawing)
         return;
+      if (this.tool === "eraser") {
+        if (this.eraserMode === "pixel") {
+          this.isErasing = false;
+          this.eraserPath = [];
+          this.saveStrokes();
+        } else if (this.eraserMode === "select-clear" && this.selectClearRect) {
+          this.pushUndo();
+          this.deleteStrokesInRect(this.selectClearRect);
+          this.selectClearRect = null;
+          this.selectClearStart = null;
+          this.scheduleRedraw();
+          this.saveStrokes();
+        }
+        return;
+      }
       if (this.previewStroke) {
         const [a2, b2] = this.previewStroke.points;
         if (dist(a2, b2) > 3) {
@@ -448,11 +514,16 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     canvas.addEventListener("pointerup", this.onPointerUp);
     canvas.addEventListener("pointerleave", this.onPointerUp);
     this.createToolbar();
+    this.eraserCursorEl = document.createElement("div");
+    this.eraserCursorEl.className = "draft-paper-eraser-cursor";
+    this.eraserCursorEl.style.display = "none";
+    document.body.appendChild(this.eraserCursorEl);
     this.active = true;
     this.isDrawing = true;
     this.tool = "pen";
     this.eraserMode = "stroke";
     this.updateModeUI();
+    this.updateCursorVisibility();
     this.scheduleRedraw();
   }
   disable() {
@@ -471,6 +542,10 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     if (this.toolbar) {
       this.toolbar.remove();
       this.toolbar = null;
+    }
+    if (this.eraserCursorEl) {
+      this.eraserCursorEl.remove();
+      this.eraserCursorEl = null;
     }
     this.strokes = [];
     this.currentStroke = null;
@@ -524,14 +599,31 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
         `;
     document.body.appendChild(bar);
     this.toolbar = bar;
+    this.eraserSubToolbar = document.createElement("div");
+    this.eraserSubToolbar.className = "draft-paper-eraser-subtoolbar";
+    this.eraserSubToolbar.innerHTML = `
+            <button data-eraser="pixel" title="\u5C40\u90E8\u64E6\u9664">\u5C40\u90E8\u64E6\u9664</button>
+            <button data-eraser="stroke" class="active" title="\u6574\u7B14\u64E6\u9664">\u6574\u7B14\u64E6\u9664</button>
+            <button data-eraser="select-clear" title="\u6846\u9009\u5220\u9664">\u6846\u9009\u5220\u9664</button>
+        `;
+    this.eraserSubToolbar.style.display = "none";
+    this.toolbar.appendChild(this.eraserSubToolbar);
     bar.querySelectorAll("[data-t]").forEach((btn) => {
       btn.addEventListener("click", (e2) => {
         e2.stopPropagation();
         const tool = btn.dataset.t;
         if (tool === "eraser") {
-          this.eraserMode = this.eraserMode === "stroke" ? "clear-all" : "stroke";
-          new import_obsidian.Notice(this.eraserMode === "stroke" ? "\u6574\u7B14\u64E6\u9664" : "\u6E05\u7A7A\u5168\u90E8");
+          const wasVisible = this.eraserSubToolbar.style.display !== "none";
+          this.eraserSubToolbar.style.display = wasVisible ? "none" : "flex";
+          if (!wasVisible && this.tool !== "eraser") {
+            this.eraserMode = "stroke";
+          }
+          this.tool = "eraser";
+          this.resetToolState();
+          this.updateCursorVisibility();
+          this.updateEraserSubToolbarActive();
         } else {
+          this.eraserSubToolbar.style.display = "none";
           this.tool = tool;
           this.eraserMode = "stroke";
           if (tool === "hand") {
@@ -539,9 +631,21 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
           } else if (this.isDrawing) {
             this.canvas.style.pointerEvents = "auto";
           }
+          this.resetToolState();
+          this.updateCursorVisibility();
         }
-        this.resetToolState();
         this.updateToolbarActive();
+      });
+    });
+    this.eraserSubToolbar.querySelectorAll("[data-eraser]").forEach((btn) => {
+      btn.addEventListener("click", (e2) => {
+        e2.stopPropagation();
+        const mode = btn.dataset.eraser;
+        this.eraserMode = mode;
+        this.resetToolState();
+        this.updateCursorVisibility();
+        this.updateEraserSubToolbarActive();
+        this.eraserSubToolbar.style.display = "none";
       });
     });
     document.getElementById("dp-mode").onclick = () => this.toggleDrawMode();
@@ -573,6 +677,12 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     if (arrowSelect)
       arrowSelect.style.display = this.tool === "arrow" ? "inline" : "none";
   }
+  updateEraserSubToolbarActive() {
+    var _a;
+    (_a = this.eraserSubToolbar) == null ? void 0 : _a.querySelectorAll("[data-eraser]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.eraser === this.eraserMode);
+    });
+  }
   toggleDrawMode() {
     this.isDrawing = !this.isDrawing;
     if (this.canvas) {
@@ -591,12 +701,22 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     else
       btn.classList.remove("active");
   }
+  updateCursorVisibility() {
+    if (this.eraserCursorEl) {
+      const show = this.tool === "eraser" && this.eraserMode === "pixel";
+      this.eraserCursorEl.style.display = show ? "block" : "none";
+    }
+  }
   resetToolState() {
     this.currentStroke = null;
     this.previewStroke = null;
+    this.eraserPath = [];
+    this.isErasing = false;
+    this.selectClearRect = null;
+    this.selectClearStart = null;
     this.scheduleRedraw();
   }
-  // ==================== 穿透 canvas ====================
+  // ==================== 穿透 canvas 获取块元素 ====================
   getBlockFromPoint(x2, y2) {
     if (!this.canvas)
       return null;
@@ -608,39 +728,53 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       return null;
     return elem.closest(BLOCK_SELECTORS);
   }
-  // ==================== 工具 ====================
+  // ==================== 橡皮实现 ====================
   eraseAt(block, p2, rect) {
+    this.pushUndo();
     const key = getBlockKey(block);
-    const absPt = { x: p2.x + rect.left, y: p2.y + rect.top };
     this.strokes = this.strokes.filter((s2) => {
       if (s2.blockKey !== key)
         return true;
-      return !s2.points.some((pt) => dist({ x: pt.x + rect.left, y: pt.y + rect.top }, absPt) < ERASER_HIT_DISTANCE);
+      const absPts = s2.points.map((pt) => ({ x: pt.x + rect.left, y: pt.y + rect.top }));
+      return !absPts.some((apt) => dist(apt, { x: p2.x + rect.left, y: p2.y + rect.top }) < ERASER_HIT_DISTANCE);
     });
     this.scheduleRedraw();
     this.saveStrokes();
   }
-  clearAll() {
-    if (this.strokes.length === 0)
+  applyPixelEraser() {
+    if (this.eraserPath.length === 0)
       return;
-    this.pushUndo();
-    this.strokes = [];
+    const newStrokes = [];
+    for (const s2 of this.strokes) {
+      const clipped = clipStrokeByPixelEraser(s2, this.eraserPath, PIXEL_ERASER_RADIUS);
+      newStrokes.push(...clipped);
+    }
+    this.strokes = newStrokes;
     this.scheduleRedraw();
-    this.saveStrokes();
-    new import_obsidian.Notice("\u753B\u5E03\u5DF2\u6E05\u7A7A\uFF0C\u53EF\u6309 Ctrl+Z \u6062\u590D");
   }
-  confirmClearAll() {
-    const modal = new import_obsidian.Modal(this.app);
-    modal.titleEl.setText("\u786E\u8BA4\u6E05\u7A7A");
-    modal.contentEl.createEl("p", { text: "\u6E05\u7A7A\u5F53\u524D\u6587\u4EF6\u6240\u6709\u6279\u6CE8\uFF1F" });
-    const btns = modal.contentEl.createDiv();
-    btns.createEl("button", { text: "\u786E\u8BA4" }).addEventListener("click", () => {
-      this.clearAll();
-      modal.close();
+  deleteStrokesInRect(rect) {
+    const minX = Math.min(rect.x1, rect.x2);
+    const maxX = Math.max(rect.x1, rect.x2);
+    const minY = Math.min(rect.y1, rect.y2);
+    const maxY = Math.max(rect.y1, rect.y2);
+    const blockMap = /* @__PURE__ */ new Map();
+    document.querySelectorAll(BLOCK_SELECTORS).forEach((el) => {
+      const key = getBlockKey(el);
+      if (key)
+        blockMap.set(key, el.getBoundingClientRect());
     });
-    btns.createEl("button", { text: "\u53D6\u6D88" }).addEventListener("click", () => modal.close());
-    modal.open();
+    this.strokes = this.strokes.filter((s2) => {
+      const blockRect = blockMap.get(s2.blockKey);
+      if (!blockRect)
+        return true;
+      return !s2.points.some((pt) => {
+        const absX = pt.x + blockRect.left;
+        const absY = pt.y + blockRect.top;
+        return absX >= minX && absX <= maxX && absY >= minY && absY <= maxY;
+      });
+    });
   }
+  // ==================== 文字工具 ====================
   textAt(block, p2) {
     const rect = block.getBoundingClientRect();
     const input = document.createElement("textarea");
@@ -688,6 +822,28 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       }
     });
   }
+  // ==================== 清空 ====================
+  clearAll() {
+    if (this.strokes.length === 0)
+      return;
+    this.pushUndo();
+    this.strokes = [];
+    this.scheduleRedraw();
+    this.saveStrokes();
+    new import_obsidian.Notice("\u753B\u5E03\u5DF2\u6E05\u7A7A\uFF0C\u53EF\u6309 Ctrl+Z \u6062\u590D");
+  }
+  confirmClearAll() {
+    const modal = new import_obsidian.Modal(this.app);
+    modal.titleEl.setText("\u786E\u8BA4\u6E05\u7A7A");
+    modal.contentEl.createEl("p", { text: "\u6E05\u7A7A\u5F53\u524D\u6587\u4EF6\u6240\u6709\u6279\u6CE8\uFF1F" });
+    const btns = modal.contentEl.createDiv();
+    btns.createEl("button", { text: "\u786E\u8BA4" }).addEventListener("click", () => {
+      this.clearAll();
+      modal.close();
+    });
+    btns.createEl("button", { text: "\u53D6\u6D88" }).addEventListener("click", () => modal.close());
+    modal.open();
+  }
   redraw() {
     if (!this.ctx || !this.canvas)
       return;
@@ -713,6 +869,30 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       const rect = blockMap.get(this.previewStroke.blockKey);
       if (rect)
         this.drawStroke(this.previewStroke, rect);
+    }
+    if (this.selectClearRect && this.tool === "eraser" && this.eraserMode === "select-clear") {
+      const anyBlock = document.querySelector(BLOCK_SELECTORS);
+      if (anyBlock) {
+        const bRect = anyBlock.getBoundingClientRect();
+        const absRect = {
+          x1: this.selectClearRect.x1 + bRect.left,
+          y1: this.selectClearRect.y1 + bRect.top,
+          x2: this.selectClearRect.x2 + bRect.left,
+          y2: this.selectClearRect.y2 + bRect.top
+        };
+        this.ctx.save();
+        this.ctx.strokeStyle = "#ff6666";
+        this.ctx.lineWidth = 1.5;
+        this.ctx.setLineDash([6, 3]);
+        this.ctx.strokeRect(
+          Math.min(absRect.x1, absRect.x2),
+          Math.min(absRect.y1, absRect.y2),
+          Math.abs(absRect.x2 - absRect.x1),
+          Math.abs(absRect.y2 - absRect.y1)
+        );
+        this.ctx.setLineDash([]);
+        this.ctx.restore();
+      }
     }
   }
   drawStroke(stroke, blockRect) {

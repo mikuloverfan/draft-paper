@@ -21,13 +21,14 @@ interface Stroke {
 
 type ArrowStyle = "straight" | "curved" | "dashed" | "double";
 type ToolMode = "pen" | "highlighter" | "eraser" | "arrow" | "rect" | "text" | "hand";
-type EraserMode = "stroke" | "clear-all";
+type EraserMode = "pixel" | "stroke" | "select-clear";
 
 const DEFAULT_COLOR = "#ff3333";
 const DEFAULT_LINE_WIDTH = 2.5;
 const HIGHLIGHTER_COLOR = "#ffeb3b";
 const HIGHLIGHTER_OPACITY = 0.25;
 const ERASER_HIT_DISTANCE = 15;
+const PIXEL_ERASER_RADIUS = 16;
 const FREEHAND_OPTIONS = {
     size: 1,
     thinning: 0.6,
@@ -48,6 +49,34 @@ function getBlockKey(el: HTMLElement): string {
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 function dist(a: Point, b: Point) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
+function clipStrokeByPixelEraser(stroke: Stroke, eraserPoints: Point[], radius: number): Stroke[] {
+    const erased = stroke.points.map(p =>
+        eraserPoints.some(ep => dist(p, ep) < radius)
+    );
+    if (!erased.some(Boolean)) return [stroke];
+
+    const segments: Stroke[] = [];
+    let current: Point[] = [];
+
+    for (let i = 0; i < stroke.points.length; i++) {
+        if (!erased[i]) {
+            current.push({ ...stroke.points[i] });
+        } else {
+            if (current.length >= 2) {
+                segments.push({ ...stroke, points: current });
+            }
+            current = [];
+        }
+    }
+    if (current.length >= 2) {
+        segments.push({ ...stroke, points: current });
+    }
+    return segments;
+}
+
+// ============================================================
+//  插件主体
+// ============================================================
 export default class DraftPaperPlugin extends Plugin {
     private active = false;
     private isDrawing = true;
@@ -59,12 +88,23 @@ export default class DraftPaperPlugin extends Plugin {
     private currentStroke: Stroke | null = null;
     private previewStroke: Stroke | null = null;
     private toolbar: HTMLElement | null = null;
+    private eraserSubToolbar: HTMLElement | null = null;
+    private eraserCursorEl: HTMLElement | null = null;
+
     private color = DEFAULT_COLOR;
     private lineWidth = DEFAULT_LINE_WIDTH;
     private opacity = 1;
     private arrowStyle: ArrowStyle = "straight";
+
+    private eraserPath: Point[] = [];
+    private isErasing = false;
+
+    private selectClearRect: { x1: number; y1: number; x2: number; y2: number } | null = null;
+    private selectClearStart: Point | null = null;
+
     private rafPending = false;
     private currentFilePath = "";
+
     private undoStack: Stroke[][] = [];
     private redoStack: Stroke[][] = [];
     private readonly MAX_UNDO = 100;
@@ -126,11 +166,18 @@ export default class DraftPaperPlugin extends Plugin {
         canvas.addEventListener("pointerleave", this.onPointerUp);
 
         this.createToolbar();
+
+        this.eraserCursorEl = document.createElement("div");
+        this.eraserCursorEl.className = "draft-paper-eraser-cursor";
+        this.eraserCursorEl.style.display = "none";
+        document.body.appendChild(this.eraserCursorEl);
+
         this.active = true;
         this.isDrawing = true;
         this.tool = "pen";
         this.eraserMode = "stroke";
         this.updateModeUI();
+        this.updateCursorVisibility();
         this.scheduleRedraw();
     }
 
@@ -147,6 +194,7 @@ export default class DraftPaperPlugin extends Plugin {
             this.ctx = null;
         }
         if (this.toolbar) { this.toolbar.remove(); this.toolbar = null; }
+        if (this.eraserCursorEl) { this.eraserCursorEl.remove(); this.eraserCursorEl = null; }
         this.strokes = [];
         this.currentStroke = null;
         this.active = false;
@@ -201,14 +249,32 @@ export default class DraftPaperPlugin extends Plugin {
         document.body.appendChild(bar);
         this.toolbar = bar;
 
+        this.eraserSubToolbar = document.createElement("div");
+        this.eraserSubToolbar.className = "draft-paper-eraser-subtoolbar";
+        this.eraserSubToolbar.innerHTML = `
+            <button data-eraser="pixel" title="局部擦除">局部擦除</button>
+            <button data-eraser="stroke" class="active" title="整笔擦除">整笔擦除</button>
+            <button data-eraser="select-clear" title="框选删除">框选删除</button>
+        `;
+        this.eraserSubToolbar.style.display = "none";
+        this.toolbar.appendChild(this.eraserSubToolbar);
+
         bar.querySelectorAll("[data-t]").forEach(btn => {
             btn.addEventListener("click", e => {
                 e.stopPropagation();
                 const tool = (btn as HTMLElement).dataset.t as ToolMode;
                 if (tool === "eraser") {
-                    this.eraserMode = this.eraserMode === "stroke" ? "clear-all" : "stroke";
-                    new Notice(this.eraserMode === "stroke" ? "整笔擦除" : "清空全部");
+                    const wasVisible = this.eraserSubToolbar!.style.display !== "none";
+                    this.eraserSubToolbar!.style.display = wasVisible ? "none" : "flex";
+                    if (!wasVisible && this.tool !== "eraser") {
+                        this.eraserMode = "stroke";
+                    }
+                    this.tool = "eraser";
+                    this.resetToolState();
+                    this.updateCursorVisibility();
+                    this.updateEraserSubToolbarActive();
                 } else {
+                    this.eraserSubToolbar!.style.display = "none";
                     this.tool = tool;
                     this.eraserMode = "stroke";
                     if (tool === "hand") {
@@ -216,9 +282,22 @@ export default class DraftPaperPlugin extends Plugin {
                     } else if (this.isDrawing) {
                         this.canvas!.style.pointerEvents = "auto";
                     }
+                    this.resetToolState();
+                    this.updateCursorVisibility();
                 }
-                this.resetToolState();
                 this.updateToolbarActive();
+            });
+        });
+
+        this.eraserSubToolbar.querySelectorAll("[data-eraser]").forEach(btn => {
+            btn.addEventListener("click", e => {
+                e.stopPropagation();
+                const mode = (btn as HTMLElement).dataset.eraser as EraserMode;
+                this.eraserMode = mode;
+                this.resetToolState();
+                this.updateCursorVisibility();
+                this.updateEraserSubToolbarActive();
+                this.eraserSubToolbar!.style.display = "none";
             });
         });
 
@@ -252,6 +331,12 @@ export default class DraftPaperPlugin extends Plugin {
         if (arrowSelect) arrowSelect.style.display = this.tool === "arrow" ? "inline" : "none";
     }
 
+    private updateEraserSubToolbarActive() {
+        this.eraserSubToolbar?.querySelectorAll("[data-eraser]").forEach(btn => {
+            btn.classList.toggle("active", (btn as HTMLElement).dataset.eraser === this.eraserMode);
+        });
+    }
+
     private toggleDrawMode() {
         this.isDrawing = !this.isDrawing;
         if (this.canvas) {
@@ -269,13 +354,24 @@ export default class DraftPaperPlugin extends Plugin {
         else btn.classList.remove("active");
     }
 
+    private updateCursorVisibility() {
+        if (this.eraserCursorEl) {
+            const show = this.tool === "eraser" && this.eraserMode === "pixel";
+            this.eraserCursorEl.style.display = show ? "block" : "none";
+        }
+    }
+
     private resetToolState() {
         this.currentStroke = null;
         this.previewStroke = null;
+        this.eraserPath = [];
+        this.isErasing = false;
+        this.selectClearRect = null;
+        this.selectClearStart = null;
         this.scheduleRedraw();
     }
 
-    // ==================== 穿透 canvas ====================
+    // ==================== 穿透 canvas 获取块元素 ====================
     private getBlockFromPoint(x: number, y: number): HTMLElement | null {
         if (!this.canvas) return null;
         const prevPE = this.canvas.style.pointerEvents;
@@ -301,12 +397,23 @@ export default class DraftPaperPlugin extends Plugin {
         if (this.tool === "hand") return;
 
         if (this.tool === "eraser") {
-            if (this.eraserMode === "stroke") { this.eraseAt(block, p, rect); }
-            else { this.clearAll(); }
+            if (this.eraserMode === "stroke") {
+                this.eraseAt(block, p, rect);
+            } else if (this.eraserMode === "pixel") {
+                this.isErasing = true;
+                this.eraserPath = [p];
+                this.applyPixelEraser();
+            } else if (this.eraserMode === "select-clear") {
+                this.selectClearStart = p;
+                this.selectClearRect = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+            }
             return;
         }
 
-        if (this.tool === "text") { this.textAt(block, p); return; }
+        if (this.tool === "text") {
+            this.textAt(block, p);
+            return;
+        }
 
         if (this.tool === "pen" || this.tool === "highlighter") {
             this.currentStroke = {
@@ -342,8 +449,25 @@ export default class DraftPaperPlugin extends Plugin {
         const rect = block.getBoundingClientRect();
         const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
-        if (this.tool === "eraser" && this.eraserMode === "stroke" && e.buttons === 1) {
-            this.eraseAt(block, p, rect);
+        if (this.tool === "eraser" && this.eraserMode === "pixel" && this.eraserCursorEl) {
+            const size = PIXEL_ERASER_RADIUS * 2;
+            this.eraserCursorEl.style.left = `${e.clientX - PIXEL_ERASER_RADIUS}px`;
+            this.eraserCursorEl.style.top = `${e.clientY - PIXEL_ERASER_RADIUS}px`;
+            this.eraserCursorEl.style.width = `${size}px`;
+            this.eraserCursorEl.style.height = `${size}px`;
+        }
+
+        if (this.tool === "eraser") {
+            if (this.eraserMode === "stroke" && e.buttons === 1) {
+                this.eraseAt(block, p, rect);
+            } else if (this.eraserMode === "pixel" && this.isErasing) {
+                this.eraserPath.push(p);
+                this.applyPixelEraser();
+            } else if (this.eraserMode === "select-clear" && this.selectClearRect) {
+                this.selectClearRect.x2 = p.x;
+                this.selectClearRect.y2 = p.y;
+                this.scheduleRedraw();
+            }
             return;
         }
 
@@ -370,6 +494,22 @@ export default class DraftPaperPlugin extends Plugin {
     private onPointerUp = () => {
         if (!this.active || !this.isDrawing) return;
 
+        if (this.tool === "eraser") {
+            if (this.eraserMode === "pixel") {
+                this.isErasing = false;
+                this.eraserPath = [];
+                this.saveStrokes();
+            } else if (this.eraserMode === "select-clear" && this.selectClearRect) {
+                this.pushUndo();
+                this.deleteStrokesInRect(this.selectClearRect);
+                this.selectClearRect = null;
+                this.selectClearStart = null;
+                this.scheduleRedraw();
+                this.saveStrokes();
+            }
+            return;
+        }
+
         if (this.previewStroke) {
             const [a, b] = this.previewStroke.points;
             if (dist(a, b) > 3) {
@@ -394,40 +534,54 @@ export default class DraftPaperPlugin extends Plugin {
         }
     };
 
-    // ==================== 工具 ====================
+    // ==================== 橡皮实现 ====================
     private eraseAt(block: HTMLElement, p: Point, rect: DOMRect) {
+        this.pushUndo();
         const key = getBlockKey(block);
-        const absPt = { x: p.x + rect.left, y: p.y + rect.top };
         this.strokes = this.strokes.filter(s => {
             if (s.blockKey !== key) return true;
-            return !s.points.some(pt => dist({ x: pt.x + rect.left, y: pt.y + rect.top }, absPt) < ERASER_HIT_DISTANCE);
+            const absPts = s.points.map(pt => ({ x: pt.x + rect.left, y: pt.y + rect.top }));
+            return !absPts.some(apt => dist(apt, { x: p.x + rect.left, y: p.y + rect.top }) < ERASER_HIT_DISTANCE);
         });
         this.scheduleRedraw();
         this.saveStrokes();
     }
 
-    private clearAll() {
-        if (this.strokes.length === 0) return;
-        this.pushUndo();
-        this.strokes = [];
+    private applyPixelEraser() {
+        if (this.eraserPath.length === 0) return;
+        const newStrokes: Stroke[] = [];
+        for (const s of this.strokes) {
+            const clipped = clipStrokeByPixelEraser(s, this.eraserPath, PIXEL_ERASER_RADIUS);
+            newStrokes.push(...clipped);
+        }
+        this.strokes = newStrokes;
         this.scheduleRedraw();
-        this.saveStrokes();
-        new Notice("画布已清空，可按 Ctrl+Z 恢复");
     }
 
-    private confirmClearAll() {
-        const modal = new Modal(this.app);
-        modal.titleEl.setText("确认清空");
-        modal.contentEl.createEl("p", { text: "清空当前文件所有批注？" });
-        const btns = modal.contentEl.createDiv();
-        btns.createEl("button", { text: "确认" }).addEventListener("click", () => {
-            this.clearAll();
-            modal.close();
+    private deleteStrokesInRect(rect: { x1: number; y1: number; x2: number; y2: number }) {
+        const minX = Math.min(rect.x1, rect.x2);
+        const maxX = Math.max(rect.x1, rect.x2);
+        const minY = Math.min(rect.y1, rect.y2);
+        const maxY = Math.max(rect.y1, rect.y2);
+
+        const blockMap = new Map<string, DOMRect>();
+        document.querySelectorAll(BLOCK_SELECTORS).forEach(el => {
+            const key = getBlockKey(el as HTMLElement);
+            if (key) blockMap.set(key, (el as HTMLElement).getBoundingClientRect());
         });
-        btns.createEl("button", { text: "取消" }).addEventListener("click", () => modal.close());
-        modal.open();
+
+        this.strokes = this.strokes.filter(s => {
+            const blockRect = blockMap.get(s.blockKey);
+            if (!blockRect) return true;
+            return !s.points.some(pt => {
+                const absX = pt.x + blockRect.left;
+                const absY = pt.y + blockRect.top;
+                return absX >= minX && absX <= maxX && absY >= minY && absY <= maxY;
+            });
+        });
     }
 
+    // ==================== 文字工具 ====================
     private textAt(block: HTMLElement, p: Point) {
         const rect = block.getBoundingClientRect();
         const input = document.createElement("textarea");
@@ -468,6 +622,29 @@ export default class DraftPaperPlugin extends Plugin {
         });
     }
 
+    // ==================== 清空 ====================
+    private clearAll() {
+        if (this.strokes.length === 0) return;
+        this.pushUndo();
+        this.strokes = [];
+        this.scheduleRedraw();
+        this.saveStrokes();
+        new Notice("画布已清空，可按 Ctrl+Z 恢复");
+    }
+
+    private confirmClearAll() {
+        const modal = new Modal(this.app);
+        modal.titleEl.setText("确认清空");
+        modal.contentEl.createEl("p", { text: "清空当前文件所有批注？" });
+        const btns = modal.contentEl.createDiv();
+        btns.createEl("button", { text: "确认" }).addEventListener("click", () => {
+            this.clearAll();
+            modal.close();
+        });
+        btns.createEl("button", { text: "取消" }).addEventListener("click", () => modal.close());
+        modal.open();
+    }
+
     // ==================== 渲染 ====================
     private scheduleRedraw = () => {
         if (!this.rafPending) {
@@ -504,6 +681,31 @@ export default class DraftPaperPlugin extends Plugin {
         if (this.previewStroke) {
             const rect = blockMap.get(this.previewStroke.blockKey);
             if (rect) this.drawStroke(this.previewStroke, rect);
+        }
+
+        if (this.selectClearRect && this.tool === "eraser" && this.eraserMode === "select-clear") {
+            const anyBlock = document.querySelector(BLOCK_SELECTORS) as HTMLElement;
+            if (anyBlock) {
+                const bRect = anyBlock.getBoundingClientRect();
+                const absRect = {
+                    x1: this.selectClearRect.x1 + bRect.left,
+                    y1: this.selectClearRect.y1 + bRect.top,
+                    x2: this.selectClearRect.x2 + bRect.left,
+                    y2: this.selectClearRect.y2 + bRect.top,
+                };
+                this.ctx.save();
+                this.ctx.strokeStyle = "#ff6666";
+                this.ctx.lineWidth = 1.5;
+                this.ctx.setLineDash([6, 3]);
+                this.ctx.strokeRect(
+                    Math.min(absRect.x1, absRect.x2),
+                    Math.min(absRect.y1, absRect.y2),
+                    Math.abs(absRect.x2 - absRect.x1),
+                    Math.abs(absRect.y2 - absRect.y1)
+                );
+                this.ctx.setLineDash([]);
+                this.ctx.restore();
+            }
         }
     }
 
