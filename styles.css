@@ -54,12 +54,12 @@
 }
 
 /* 带文字的按钮（绘图/阅读切换） */
-.dp-text-btn {
-    width: auto !important;
-    min-width: 80px !important;
-    padding: 0 10px !important;
-    font-size: 13px !important;
-    white-space: nowrap !important;
+body #draft-paper-toolbar .dp-text-btn {
+    width: auto;
+    min-width: 80px;
+    padding: 0 10px;
+    font-size: 13px;
+    white-space: nowrap;
 }
 
 #dp-color {
