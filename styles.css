@@ -1,77 +1,40 @@
-/* ============================================================
-   Draft Paper v10 - 完整样式表
-   ============================================================ */
-
-/* ---------- Overlay（仅包含 canvas） ---------- */
-.draft-paper-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
-    z-index: 9999;
-    pointer-events: auto;          /* 默认 auto，POINTER 模式时由 JS 改为 none */
-    touch-action: none;
-    background: transparent;
-}
-
-.draft-paper-canvas {
-    position: absolute;
-    top: 0;
-    left: 0;
-    outline: none;
+#draft-paper-canvas {
     cursor: crosshair;
 }
 
-/* ---------- 橡皮擦光标（在 overlay 内） ---------- */
-.draft-paper-eraser-cursor {
+#draft-paper-toolbar {
     position: fixed;
-    border: 2px dashed #ff6666;
-    border-radius: 50%;
-    pointer-events: none;
-    z-index: 10000;
-    background: rgba(255, 100, 100, 0.08);
-}
-
-/* ---------- 工具栏容器（独立于 overlay，挂载在 body） ---------- */
-.draft-paper-toolbar-container {
-    position: fixed;
-    bottom: 20px;
+    bottom: 24px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 10001;
+    z-index: 10000;
     display: flex;
-    flex-direction: column;
+    gap: 16px;
     align-items: center;
-    pointer-events: auto;          /* 工具栏永远可交互 */
-}
-
-/* ---------- 工具栏本体 ---------- */
-.draft-paper-toolbar {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    padding: 6px 14px;
+    padding: 8px 20px;
     background: var(--background-primary);
     border: 1px solid var(--background-modifier-border);
-    border-radius: 12px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.13);
+    border-radius: 16px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
     user-select: none;
+    flex-wrap: nowrap;
+    white-space: nowrap;
 }
 
-/* ---------- 工具按钮组 ---------- */
-.draft-paper-tool-buttons,
-.draft-paper-mode-buttons {
+.dp-tool-group,
+.dp-style-group,
+.dp-mode-group {
     display: flex;
-    gap: 4px;
+    align-items: center;
+    gap: 8px;
 }
 
-/* ---------- 按钮通用样式 ---------- */
-.draft-paper-toolbar button {
-    width: 32px;
-    height: 32px;
+/* 工具按钮（仅 emoji） */
+#draft-paper-toolbar button {
+    width: 34px;
+    height: 34px;
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     background: transparent;
     cursor: pointer;
     font-size: 16px;
@@ -81,69 +44,46 @@
     transition: background 0.15s;
 }
 
-.draft-paper-toolbar button:hover {
+#draft-paper-toolbar button:hover {
     background: var(--background-modifier-hover);
 }
 
-.draft-paper-toolbar button.active {
+#draft-paper-toolbar button.active {
     background: var(--interactive-accent);
     color: #fff;
 }
 
-/* ---------- 设置区域 ---------- */
-.draft-paper-tool-settings {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
+/* 带文字的按钮（绘图/阅读切换） */
+.dp-text-btn {
+    width: auto !important;
+    min-width: 80px !important;
+    padding: 0 10px !important;
+    font-size: 13px !important;
+    white-space: nowrap !important;
 }
 
-.draft-paper-color-picker {
-    width: 24px;
-    height: 24px;
+#dp-color {
+    width: 30px;
+    height: 30px;
     border: none;
     border-radius: 4px;
     cursor: pointer;
-    background: none;
-    padding: 0;
 }
 
-.draft-paper-line-width,
-.draft-paper-opacity {
-    width: 60px;
+#dp-width,
+#dp-opacity {
+    width: 70px;
 }
 
-.draft-paper-line-width-label,
-.draft-paper-opacity-label,
-.draft-paper-arrow-style {
+#dp-wlbl,
+#dp-olbl {
     font-size: 11px;
     color: var(--text-muted);
-    white-space: nowrap;
+    min-width: 35px;
+    text-align: center;
 }
 
-/* ---------- 橡皮擦子工具栏（浮在工具栏上方） ---------- */
-.draft-paper-eraser-subtoolbar {
-    display: none;                 /* 默认隐藏，点击橡皮擦按钮时显示 */
-    flex-direction: row;
-    gap: 4px;
-    margin-top: 4px;
-    padding: 4px 8px;
-    background: var(--background-secondary);
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-}
-
-.draft-paper-eraser-subtoolbar button {
-    padding: 2px 8px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
-}
-
-.draft-paper-eraser-subtoolbar button.active {
-    background: var(--interactive-accent);
-    color: #fff;
+#dp-arrow-style {
+    font-size: 14px;
+    padding: 2px 4px;
 }

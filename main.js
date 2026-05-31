@@ -224,9 +224,9 @@ function R(e2, t2 = {}) {
 // main.ts
 var DEFAULT_COLOR = "#ff3333";
 var DEFAULT_LINE_WIDTH = 2.5;
-var DEFAULT_OPACITY = 1;
-var ERASER_HIT_DISTANCE = 12;
-var ERASER_CURSOR_SIZE = 24;
+var HIGHLIGHTER_COLOR = "#ffeb3b";
+var HIGHLIGHTER_OPACITY = 0.25;
+var ERASER_HIT_DISTANCE = 15;
 var FREEHAND_OPTIONS = {
   size: 1,
   thinning: 0.6,
@@ -237,162 +237,246 @@ var FREEHAND_OPTIONS = {
   start: { taper: 0, cap: true },
   end: { taper: 0, cap: true }
 };
-var ARROW_STYLES = ["straight", "curved", "dashed", "double"];
-function sleep(ms) {
-  return new Promise((r2) => setTimeout(r2, ms));
+var BLOCK_SELECTORS = "p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, .math-block, .callout";
+function getBlockKey(el) {
+  var _a;
+  return ((_a = el.textContent) == null ? void 0 : _a.trim().substring(0, 60)) || "";
 }
 function dist(a2, b2) {
   return Math.hypot(a2.x - b2.x, a2.y - b2.y);
 }
-function distToSegment(p2, a2, b2) {
-  const dx = b2.x - a2.x, dy = b2.y - a2.y;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0)
-    return dist(p2, a2);
-  let t2 = ((p2.x - a2.x) * dx + (p2.y - a2.y) * dy) / lenSq;
-  t2 = Math.max(0, Math.min(1, t2));
-  return dist(p2, { x: a2.x + t2 * dx, y: a2.y + t2 * dy });
-}
-function pointToStrokeDist(p2, stroke) {
-  let minDist = Infinity;
-  for (let i2 = 0; i2 < stroke.points.length - 1; i2++) {
-    const d2 = distToSegment(p2, stroke.points[i2], stroke.points[i2 + 1]);
-    if (d2 < minDist)
-      minDist = d2;
-  }
-  if (stroke.points.length === 1) {
-    minDist = dist(p2, stroke.points[0]);
-  }
-  return minDist;
-}
-function strokeInRect(s2, x1, y1, x2, y2) {
-  const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
-  const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
-  return s2.points.some((p2) => p2.x >= minX && p2.x <= maxX && p2.y >= minY && p2.y <= maxY);
-}
 var DraftPaperPlugin = class extends import_obsidian.Plugin {
-  constructor(app, manifest) {
-    super(app, manifest);
-    // DOM 元素
-    __publicField(this, "overlay", null);
+  constructor() {
+    super(...arguments);
+    __publicField(this, "active", false);
+    __publicField(this, "isDrawing", true);
+    __publicField(this, "tool", "pen");
+    __publicField(this, "eraserMode", "stroke");
     __publicField(this, "canvas", null);
     __publicField(this, "ctx", null);
-    __publicField(this, "toolbarContainer", null);
-    // 独立工具栏容器
-    __publicField(this, "eraserCursorEl", null);
-    __publicField(this, "eraserSubToolbarEl", null);
-    __publicField(this, "eraserBtnEl", null);
-    // 状态
-    __publicField(this, "isActive", false);
-    __publicField(this, "draftMode", "DRAW");
-    __publicField(this, "toolMode", "pen");
-    __publicField(this, "eraserMode", "stroke");
-    __publicField(this, "currentFilePath", "");
     __publicField(this, "strokes", []);
-    __publicField(this, "activeStroke", null);
-    __publicField(this, "currentColor", DEFAULT_COLOR);
-    __publicField(this, "currentLineWidth", DEFAULT_LINE_WIDTH);
-    __publicField(this, "currentOpacity", DEFAULT_OPACITY);
-    __publicField(this, "currentArrowStyle", "straight");
-    // 临时透传标记
-    __publicField(this, "tempPointer", false);
-    // 选择系统
-    __publicField(this, "selectedIndices", /* @__PURE__ */ new Set());
-    __publicField(this, "selectRect", null);
-    __publicField(this, "selectStart", null);
-    __publicField(this, "moveStart", null);
-    __publicField(this, "moveOriginStrokes", null);
-    // 预览（箭头/矩形）
+    __publicField(this, "currentStroke", null);
     __publicField(this, "previewStroke", null);
-    // 撤销栈
+    __publicField(this, "toolbar", null);
+    __publicField(this, "color", DEFAULT_COLOR);
+    __publicField(this, "lineWidth", DEFAULT_LINE_WIDTH);
+    __publicField(this, "opacity", 1);
+    __publicField(this, "arrowStyle", "straight");
+    __publicField(this, "rafPending", false);
+    __publicField(this, "currentFilePath", "");
     __publicField(this, "undoStack", []);
-    __publicField(this, "MAX_UNDO", 50);
-    // 低通滤波（手写平滑）
-    __publicField(this, "lastFilteredPt", null);
-    // 事件引用
-    __publicField(this, "boundPointerDown");
-    __publicField(this, "boundPointerMove");
-    __publicField(this, "boundPointerUp");
-    __publicField(this, "boundKeyDown");
-    __publicField(this, "boundKeyUp");
-    this.boundPointerDown = this.onPointerDown.bind(this);
-    this.boundPointerMove = this.onPointerMove.bind(this);
-    this.boundPointerUp = this.onPointerUp.bind(this);
-    this.boundKeyDown = this.onKeyDown.bind(this);
-    this.boundKeyUp = this.onKeyUp.bind(this);
+    __publicField(this, "redoStack", []);
+    __publicField(this, "MAX_UNDO", 100);
+    // ==================== 事件处理 ====================
+    __publicField(this, "onPointerDown", (e2) => {
+      if (!this.active || !this.isDrawing)
+        return;
+      if (e2.pointerType === "mouse" && e2.button !== 0)
+        return;
+      e2.preventDefault();
+      const block = this.getBlockFromPoint(e2.clientX, e2.clientY);
+      if (!block)
+        return;
+      const rect = block.getBoundingClientRect();
+      const p2 = { x: e2.clientX - rect.left, y: e2.clientY - rect.top };
+      if (this.tool === "hand")
+        return;
+      if (this.tool === "eraser") {
+        if (this.eraserMode === "stroke") {
+          this.eraseAt(block, p2, rect);
+        } else {
+          this.clearAll();
+        }
+        return;
+      }
+      if (this.tool === "text") {
+        this.textAt(block, p2);
+        return;
+      }
+      if (this.tool === "pen" || this.tool === "highlighter") {
+        this.currentStroke = {
+          type: this.tool === "pen" ? "pen" : "highlighter",
+          blockKey: getBlockKey(block),
+          points: [p2],
+          color: this.tool === "highlighter" ? HIGHLIGHTER_COLOR : this.color,
+          lineWidth: this.lineWidth,
+          opacity: this.tool === "highlighter" ? HIGHLIGHTER_OPACITY : this.opacity,
+          timestamp: Date.now()
+        };
+      } else if (this.tool === "arrow" || this.tool === "rect") {
+        this.previewStroke = {
+          type: this.tool,
+          blockKey: getBlockKey(block),
+          points: [p2, p2],
+          color: this.color,
+          lineWidth: this.lineWidth,
+          opacity: this.opacity,
+          timestamp: Date.now(),
+          arrowStyle: this.tool === "arrow" ? this.arrowStyle : void 0
+        };
+      }
+      this.scheduleRedraw();
+    });
+    __publicField(this, "onPointerMove", (e2) => {
+      if (!this.active || !this.isDrawing)
+        return;
+      const block = this.getBlockFromPoint(e2.clientX, e2.clientY);
+      if (!block)
+        return;
+      const rect = block.getBoundingClientRect();
+      const p2 = { x: e2.clientX - rect.left, y: e2.clientY - rect.top };
+      if (this.tool === "eraser" && this.eraserMode === "stroke" && e2.buttons === 1) {
+        this.eraseAt(block, p2, rect);
+        return;
+      }
+      if (this.previewStroke) {
+        if (getBlockKey(block) !== this.previewStroke.blockKey)
+          return;
+        this.previewStroke.points[1] = p2;
+        this.scheduleRedraw();
+        return;
+      }
+      if (!this.currentStroke)
+        return;
+      if (getBlockKey(block) !== this.currentStroke.blockKey)
+        return;
+      const last = this.currentStroke.points.at(-1);
+      const filtered = {
+        x: last.x + (p2.x - last.x) * 0.35,
+        y: last.y + (p2.y - last.y) * 0.35
+      };
+      if (dist(filtered, last) < 1)
+        return;
+      this.currentStroke.points.push(filtered);
+      this.scheduleRedraw();
+    });
+    __publicField(this, "onPointerUp", () => {
+      if (!this.active || !this.isDrawing)
+        return;
+      if (this.previewStroke) {
+        const [a2, b2] = this.previewStroke.points;
+        if (dist(a2, b2) > 3) {
+          this.pushUndo();
+          this.strokes.push({ ...this.previewStroke });
+        }
+        this.previewStroke = null;
+        this.scheduleRedraw();
+        this.saveStrokes();
+        return;
+      }
+      if (this.currentStroke) {
+        if (this.currentStroke.points.length > 1) {
+          this.pushUndo();
+          this.strokes.push(this.currentStroke);
+        }
+        this.currentStroke = null;
+        this.scheduleRedraw();
+        this.saveStrokes();
+        return;
+      }
+    });
+    // ==================== 渲染 ====================
+    __publicField(this, "scheduleRedraw", () => {
+      if (!this.rafPending) {
+        this.rafPending = true;
+        requestAnimationFrame(() => {
+          this.rafPending = false;
+          this.syncCanvasSize();
+          this.redraw();
+        });
+      }
+    });
   }
-  // ==========================================================
-  //  生命周期
-  // ==========================================================
   async onload() {
-    this.createOverlay();
-    this.addCommand({
-      id: "toggle-draft-mode",
-      name: "Toggle Draft Mode",
-      callback: () => this.toggleDraftMode()
-    });
-    this.addCommand({
-      id: "exit-draft-mode-force",
-      name: "Exit Draft Mode (Force)",
-      callback: async () => this.setDraftMode("HIDDEN")
-    });
-    this.addRibbonIcon("pencil", "Toggle Draft Paper", () => this.toggleDraftMode());
-    this.registerEvent(
-      this.app.workspace.on("active-leaf-change", () => this.syncCurrentFile())
-    );
-    document.addEventListener("keydown", this.boundKeyDown, true);
-    document.addEventListener("keyup", this.boundKeyUp, true);
-    await this.syncCurrentFile();
+    this.addRibbonIcon("pencil", "\u8349\u7A3F\u7EB8", () => this.toggle());
+    this.addCommand({ id: "toggle-draft", name: "\u5207\u6362\u8349\u7A3F\u7EB8", callback: () => this.toggle() });
+    this.registerDomEvent(window, "scroll", this.scheduleRedraw, true);
+    this.registerDomEvent(window, "resize", this.scheduleRedraw);
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => {
+      if (this.active)
+        this.scheduleRedraw();
+    }));
   }
   async onunload() {
-    this.setDraftMode("HIDDEN");
-    this.detachOverlay();
-    document.removeEventListener("keydown", this.boundKeyDown, true);
-    document.removeEventListener("keyup", this.boundKeyUp, true);
+    this.disable();
   }
-  // ==========================================================
-  //  Overlay 与 Canvas 管理
-  // ==========================================================
-  createOverlay() {
-    this.detachOverlay();
-    this.overlay = document.createElement("div");
-    this.overlay.className = "draft-paper-overlay";
-    this.overlay.style.display = "none";
-    this.canvas = document.createElement("canvas");
-    this.canvas.className = "draft-paper-canvas";
-    this.canvas.tabIndex = 0;
-    this.ctx = this.canvas.getContext("2d");
-    this.overlay.appendChild(this.canvas);
-    this.eraserCursorEl = document.createElement("div");
-    this.eraserCursorEl.className = "draft-paper-eraser-cursor";
-    this.eraserCursorEl.style.display = "none";
-    this.overlay.appendChild(this.eraserCursorEl);
-    document.body.appendChild(this.overlay);
-    this.toolbarContainer = document.createElement("div");
-    this.toolbarContainer.className = "draft-paper-toolbar-container";
-    document.body.appendChild(this.toolbarContainer);
-    this.buildToolbar();
-    this.registerDomEvent(window, "resize", () => {
-      this.resizeCanvas();
-      this.renderAllStrokes();
+  toggle() {
+    if (this.active) {
+      this.disable();
+    } else {
+      this.enable();
+    }
+  }
+  enable() {
+    var _a;
+    if (this.active)
+      return;
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    if (!view) {
+      new import_obsidian.Notice("\u8BF7\u5148\u6253\u5F00\u4E00\u4E2A Markdown \u6587\u4EF6\u8FDB\u5165\u9605\u8BFB\u6A21\u5F0F");
+      return;
+    }
+    if (view.getMode() !== "preview") {
+      this.app.commands.executeCommandById("markdown:toggle-preview");
+      setTimeout(() => this.enable(), 200);
+      return;
+    }
+    this.currentFilePath = ((_a = view.file) == null ? void 0 : _a.path) || "";
+    this.loadStrokes();
+    this.init();
+  }
+  init() {
+    const canvas = document.createElement("canvas");
+    canvas.id = "draft-paper-canvas";
+    Object.assign(canvas.style, {
+      position: "fixed",
+      top: "0",
+      left: "0",
+      width: "100vw",
+      height: "100vh",
+      zIndex: "5",
+      pointerEvents: this.isDrawing ? "auto" : "none",
+      touchAction: "none",
+      background: "transparent"
     });
+    document.body.appendChild(canvas);
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+    this.syncCanvasSize();
+    canvas.addEventListener("pointerdown", this.onPointerDown);
+    canvas.addEventListener("pointermove", this.onPointerMove);
+    canvas.addEventListener("pointerup", this.onPointerUp);
+    canvas.addEventListener("pointerleave", this.onPointerUp);
+    this.createToolbar();
+    this.active = true;
+    this.isDrawing = true;
+    this.tool = "pen";
+    this.eraserMode = "stroke";
+    this.updateModeUI();
+    this.scheduleRedraw();
   }
-  detachOverlay() {
-    if (this.overlay) {
-      this.overlay.remove();
-      this.overlay = null;
+  disable() {
+    if (!this.active)
+      return;
+    this.saveStrokes();
+    if (this.canvas) {
+      this.canvas.removeEventListener("pointerdown", this.onPointerDown);
+      this.canvas.removeEventListener("pointermove", this.onPointerMove);
+      this.canvas.removeEventListener("pointerup", this.onPointerUp);
+      this.canvas.removeEventListener("pointerleave", this.onPointerUp);
+      this.canvas.remove();
       this.canvas = null;
       this.ctx = null;
-      this.eraserCursorEl = null;
     }
-    if (this.toolbarContainer) {
-      this.toolbarContainer.remove();
-      this.toolbarContainer = null;
-      this.eraserSubToolbarEl = null;
-      this.eraserBtnEl = null;
+    if (this.toolbar) {
+      this.toolbar.remove();
+      this.toolbar = null;
     }
+    this.strokes = [];
+    this.currentStroke = null;
+    this.active = false;
   }
-  resizeCanvas() {
+  syncCanvasSize() {
     if (!this.canvas || !this.ctx)
       return;
     const dpr = window.devicePixelRatio || 1;
@@ -403,740 +487,310 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.scale(dpr, dpr);
   }
-  // ==========================================================
-  //  工具栏构建（含橡皮擦子工具栏）
-  // ==========================================================
-  buildToolbar() {
-    if (!this.toolbarContainer)
-      return;
-    this.toolbarContainer.innerHTML = `
-            <div class="draft-paper-toolbar">
-                <div class="draft-paper-tool-buttons">
-                    <button data-tool="pen" title="\u753B\u7B14 (1)">\u270F\uFE0F</button>
-                    <button data-tool="eraser" title="\u6A61\u76AE\u64E6 (2)">\u{1F9F9}</button>
-                    <button data-tool="select" title="\u6846\u9009 (3)">\u2B1C</button>
-                    <button data-tool="arrow" title="\u7BAD\u5934 (4)">\u2197</button>
-                    <button data-tool="rect" title="\u77E9\u5F62 (5)">\u2B1B</button>
-                    <button data-tool="text" title="\u6587\u5B57 (6)">T</button>
-                </div>
-                <div class="draft-paper-tool-settings">
-                    <input type="color" class="draft-paper-color-picker" value="${this.currentColor}">
-                    <input type="range" class="draft-paper-line-width" min="1" max="8" step="0.5" value="${this.currentLineWidth}">
-                    <span class="draft-paper-line-width-label">${this.currentLineWidth}px</span>
-                    <input type="range" class="draft-paper-opacity" min="10" max="100" step="5" value="${this.currentOpacity * 100}">
-                    <span class="draft-paper-opacity-label">${Math.round(this.currentOpacity * 100)}%</span>
-                    <span class="draft-paper-arrow-style" style="display:${this.toolMode === "arrow" ? "inline" : "none"}">\u6837\u5F0F: ${this.currentArrowStyle}</span>
-                </div>
-                <div class="draft-paper-mode-buttons">
-                    <button data-mode="DRAW" title="\u7ED8\u56FE\u6A21\u5F0F">\u270F\uFE0F</button>
-                    <button data-mode="POINTER" title="\u900F\u4F20\u6A21\u5F0F (\u6309\u4F4F Space \u4E34\u65F6\u5207\u6362)">\u{1F5B1}\uFE0F</button>
-                    <button data-mode="HIDDEN" title="\u9690\u85CF\u8349\u7A3F\u7EB8">\u{1F441}</button>
-                </div>
-                <button class="draft-paper-undo-btn" title="\u64A4\u9500 (Ctrl+Z)">\u21A9</button>
-                <button class="draft-paper-clear-btn" title="\u6E05\u5C4F (Ctrl+Shift+Z)">\u{1F5D1}\uFE0F</button>
+  // ==================== 工具栏 ====================
+  createToolbar() {
+    const bar = document.createElement("div");
+    bar.id = "draft-paper-toolbar";
+    bar.innerHTML = `
+            <div class="dp-tool-group">
+                <button data-t="pen" class="active" title="\u753B\u7B14 (1)">\u270F\uFE0F</button>
+                <button data-t="highlighter" title="\u8367\u5149\u7B14 (2)">\u{1F58D}\uFE0F</button>
+                <button data-t="eraser" title="\u6A61\u76AE\u64E6 (3)">\u{1F9F9}</button>
+                <button data-t="arrow" title="\u7BAD\u5934 (4)">\u2197</button>
+                <button data-t="rect" title="\u77E9\u5F62 (5)">\u2B1B</button>
+                <button data-t="text" title="\u6587\u5B57 (6)">T</button>
+                <button data-t="hand" title="\u624B\u638C (7)">\u{1F590}\uFE0F</button>
+            </div>
+            <div class="dp-style-group">
+                <input type="color" id="dp-color" value="${this.color}" title="\u989C\u8272">
+                <input type="range" id="dp-width" min="1" max="8" step="0.5" value="${this.lineWidth}" title="\u7C97\u7EC6">
+                <span id="dp-wlbl">${this.lineWidth}px</span>
+                <input type="range" id="dp-opacity" min="10" max="100" value="${this.opacity * 100}" title="\u900F\u660E\u5EA6">
+                <span id="dp-olbl">${Math.round(this.opacity * 100)}%</span>
+                <select id="dp-arrow-style" style="display:none">
+                    <option value="straight" selected>\u2192</option>
+                    <option value="curved">\u219D</option>
+                    <option value="dashed">\u21E2</option>
+                    <option value="double">\u2194</option>
+                </select>
+            </div>
+            <div class="dp-mode-group">
+                <button id="dp-mode" class="dp-text-btn">\u{1F7E2} \u7ED8\u56FE</button>
+                <button id="dp-undo" title="\u64A4\u9500 (Ctrl+Z)">\u21A9</button>
+                <button id="dp-redo" title="\u91CD\u505A (Ctrl+Shift+Z)">\u21AA</button>
+                <button id="dp-clear" title="\u6E05\u7A7A\u753B\u5E03">\u{1F5D1}</button>
+                <button id="dp-exit" title="\u9000\u51FA\u8349\u7A3F\u7EB8">\u274C</button>
             </div>
         `;
-    this.eraserSubToolbarEl = document.createElement("div");
-    this.eraserSubToolbarEl.className = "draft-paper-eraser-subtoolbar";
-    this.eraserSubToolbarEl.innerHTML = `
-            <button data-eraser="stroke" class="active">\u6574\u7B14\u5220\u9664</button>
-            <button data-eraser="clear-selected">\u5220\u9664\u9009\u4E2D</button>
-            <button data-eraser="clear-all">\u6E05\u7A7A\u5168\u90E8</button>
-        `;
-    this.eraserSubToolbarEl.style.display = "none";
-    this.toolbarContainer.appendChild(this.eraserSubToolbarEl);
-    this.eraserBtnEl = this.toolbarContainer.querySelector('[data-tool="eraser"]');
-    this.bindToolbarEvents();
-  }
-  bindToolbarEvents() {
-    var _a, _b, _c;
-    this.toolbarContainer.addEventListener("pointerdown", (e2) => e2.stopPropagation());
-    this.toolbarContainer.querySelectorAll("[data-tool]").forEach((btn) => {
+    document.body.appendChild(bar);
+    this.toolbar = bar;
+    bar.querySelectorAll("[data-t]").forEach((btn) => {
       btn.addEventListener("click", (e2) => {
-        var _a2;
         e2.stopPropagation();
-        const tool = btn.dataset.tool;
+        const tool = btn.dataset.t;
         if (tool === "eraser") {
-          if (this.toolMode === "eraser") {
-            const isVisible = this.eraserSubToolbarEl.style.display !== "none";
-            this.eraserSubToolbarEl.style.display = isVisible ? "none" : "flex";
-          } else {
-            this.toolMode = "eraser";
-            this.eraserMode = "stroke";
-            this.eraserSubToolbarEl.style.display = "flex";
-          }
+          this.eraserMode = this.eraserMode === "stroke" ? "clear-all" : "stroke";
+          new import_obsidian.Notice(this.eraserMode === "stroke" ? "\u6574\u7B14\u64E6\u9664" : "\u6E05\u7A7A\u5168\u90E8");
         } else {
-          this.eraserSubToolbarEl.style.display = "none";
-          this.toolMode = tool;
+          this.tool = tool;
+          this.eraserMode = "stroke";
+          if (tool === "hand") {
+            this.canvas.style.pointerEvents = "none";
+          } else if (this.isDrawing) {
+            this.canvas.style.pointerEvents = "auto";
+          }
         }
         this.resetToolState();
         this.updateToolbarActive();
-        (_a2 = this.canvas) == null ? void 0 : _a2.focus();
       });
     });
-    (_a = this.eraserSubToolbarEl) == null ? void 0 : _a.querySelectorAll("[data-eraser]").forEach((btn) => {
-      btn.addEventListener("click", (e2) => {
-        var _a2;
-        e2.stopPropagation();
-        const mode = btn.dataset.eraser;
-        this.eraserMode = mode;
-        if (mode === "clear-selected") {
-          if (this.selectedIndices.size === 0) {
-            new import_obsidian.Notice("\u6CA1\u6709\u9009\u4E2D\u7684\u5143\u7D20");
-          } else {
-            this.deleteSelected();
-          }
-        } else if (mode === "clear-all") {
-          this.confirmClearAll();
-        }
-        this.eraserSubToolbarEl.style.display = "none";
-        this.updateToolbarActive();
-        (_a2 = this.canvas) == null ? void 0 : _a2.focus();
-      });
+    document.getElementById("dp-mode").onclick = () => this.toggleDrawMode();
+    document.getElementById("dp-undo").onclick = () => this.undo();
+    document.getElementById("dp-redo").onclick = () => this.redo();
+    document.getElementById("dp-clear").onclick = () => this.confirmClearAll();
+    document.getElementById("dp-exit").onclick = () => this.disable();
+    document.getElementById("dp-color").addEventListener("input", (e2) => {
+      this.color = e2.target.value;
     });
-    this.toolbarContainer.querySelectorAll("[data-mode]").forEach((btn) => {
-      btn.addEventListener("click", (e2) => {
-        e2.stopPropagation();
-        const mode = btn.dataset.mode;
-        this.setDraftMode(mode);
-      });
+    document.getElementById("dp-width").addEventListener("input", (e2) => {
+      this.lineWidth = parseFloat(e2.target.value);
+      document.getElementById("dp-wlbl").textContent = `${this.lineWidth}px`;
     });
-    const colorPicker = this.toolbarContainer.querySelector(".draft-paper-color-picker");
-    colorPicker == null ? void 0 : colorPicker.addEventListener("input", (e2) => {
-      this.currentColor = e2.target.value;
+    document.getElementById("dp-opacity").addEventListener("input", (e2) => {
+      this.opacity = parseInt(e2.target.value) / 100;
+      document.getElementById("dp-olbl").textContent = `${Math.round(this.opacity * 100)}%`;
     });
-    const widthSlider = this.toolbarContainer.querySelector(".draft-paper-line-width");
-    widthSlider == null ? void 0 : widthSlider.addEventListener("input", (e2) => {
-      this.currentLineWidth = parseFloat(e2.target.value);
-      const lbl = this.toolbarContainer.querySelector(".draft-paper-line-width-label");
-      if (lbl)
-        lbl.textContent = `${this.currentLineWidth}px`;
-    });
-    const opacitySlider = this.toolbarContainer.querySelector(".draft-paper-opacity");
-    opacitySlider == null ? void 0 : opacitySlider.addEventListener("input", (e2) => {
-      this.currentOpacity = parseInt(e2.target.value) / 100;
-      const lbl = this.toolbarContainer.querySelector(".draft-paper-opacity-label");
-      if (lbl)
-        lbl.textContent = `${Math.round(this.currentOpacity * 100)}%`;
-    });
-    (_b = this.toolbarContainer.querySelector(".draft-paper-undo-btn")) == null ? void 0 : _b.addEventListener("click", (e2) => {
-      var _a2;
-      e2.stopPropagation();
-      this.undo();
-      (_a2 = this.canvas) == null ? void 0 : _a2.focus();
-    });
-    (_c = this.toolbarContainer.querySelector(".draft-paper-clear-btn")) == null ? void 0 : _c.addEventListener("click", (e2) => {
-      e2.stopPropagation();
-      this.confirmClearAll();
+    document.getElementById("dp-arrow-style").addEventListener("change", (e2) => {
+      this.arrowStyle = e2.target.value;
     });
   }
   updateToolbarActive() {
-    var _a, _b, _c, _d;
-    (_a = this.toolbarContainer) == null ? void 0 : _a.querySelectorAll("[data-tool]").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.tool === this.toolMode);
+    var _a;
+    (_a = this.toolbar) == null ? void 0 : _a.querySelectorAll("[data-t]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.t === this.tool);
     });
-    (_b = this.toolbarContainer) == null ? void 0 : _b.querySelectorAll("[data-mode]").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.mode === this.draftMode);
-    });
-    (_c = this.eraserSubToolbarEl) == null ? void 0 : _c.querySelectorAll("[data-eraser]").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.eraser === this.eraserMode);
-    });
-    const arrowLabel = (_d = this.toolbarContainer) == null ? void 0 : _d.querySelector(".draft-paper-arrow-style");
-    if (arrowLabel) {
-      arrowLabel.style.display = this.toolMode === "arrow" ? "inline" : "none";
-      arrowLabel.textContent = `\u6837\u5F0F: ${this.currentArrowStyle}`;
-    }
-    if (this.eraserCursorEl) {
-      const showEraserCursor = this.isActive && this.draftMode === "DRAW" && this.toolMode === "eraser" && this.eraserMode === "stroke";
-      this.eraserCursorEl.style.display = showEraserCursor ? "block" : "none";
-    }
+    const arrowSelect = document.getElementById("dp-arrow-style");
+    if (arrowSelect)
+      arrowSelect.style.display = this.tool === "arrow" ? "inline" : "none";
   }
-  // ==========================================================
-  //  模式控制（DRAW / POINTER / HIDDEN）
-  // ==========================================================
-  setDraftMode(mode) {
-    if (!this.overlay || !this.canvas)
-      return;
-    this.draftMode = mode;
-    this.tempPointer = false;
-    if (mode === "HIDDEN") {
-      this.exitDraftMode(true);
-      return;
+  toggleDrawMode() {
+    this.isDrawing = !this.isDrawing;
+    if (this.canvas) {
+      this.canvas.style.pointerEvents = this.isDrawing ? "auto" : "none";
+      this.canvas.style.cursor = this.isDrawing ? "crosshair" : "default";
     }
-    if (!this.isActive) {
-      this.enterDraftModeSilent();
-    }
-    if (mode === "DRAW") {
-      this.overlay.style.pointerEvents = "auto";
-      this.canvas.style.pointerEvents = "auto";
-      this.canvas.style.cursor = this.toolMode === "eraser" ? "none" : this.toolMode === "text" ? "text" : "crosshair";
-    } else if (mode === "POINTER") {
-      this.overlay.style.pointerEvents = "none";
-      this.canvas.style.pointerEvents = "none";
-      this.canvas.style.cursor = "default";
-    }
-    if (this.toolbarContainer) {
-      this.toolbarContainer.style.display = "flex";
-    }
-    this.updateToolbarActive();
-    this.renderAllStrokes();
+    this.updateModeUI();
   }
-  enterDraftModeSilent() {
-    if (this.isActive || !this.overlay || !this.canvas)
+  updateModeUI() {
+    const btn = document.getElementById("dp-mode");
+    if (!btn)
       return;
-    this.overlay.style.display = "block";
-    this.resizeCanvas();
-    document.body.style.overflow = "hidden";
-    this.canvas.addEventListener("pointerdown", this.boundPointerDown);
-    this.canvas.addEventListener("pointermove", this.boundPointerMove);
-    this.canvas.addEventListener("pointerup", this.boundPointerUp);
-    this.canvas.addEventListener("pointerleave", this.boundPointerUp);
-    this.canvas.focus();
-    this.isActive = true;
+    btn.textContent = this.isDrawing ? "\u{1F7E2} \u7ED8\u56FE" : "\u{1F441} \u9605\u8BFB";
+    if (!this.isDrawing)
+      btn.classList.add("active");
+    else
+      btn.classList.remove("active");
   }
-  exitDraftMode(silent = false) {
-    if (!this.isActive || !this.overlay || !this.canvas)
-      return;
-    if (this.activeStroke)
-      this.finishStroke();
-    this.selectRect = null;
-    this.selectedIndices.clear();
-    this.previewStroke = null;
-    this.lastFilteredPt = null;
-    this.overlay.style.display = "none";
-    this.canvas.removeEventListener("pointerdown", this.boundPointerDown);
-    this.canvas.removeEventListener("pointermove", this.boundPointerMove);
-    this.canvas.removeEventListener("pointerup", this.boundPointerUp);
-    this.canvas.removeEventListener("pointerleave", this.boundPointerUp);
-    document.body.style.overflow = "";
-    this.isActive = false;
-    this.draftMode = "HIDDEN";
-    this.saveStrokes();
-    if (!silent)
-      new import_obsidian.Notice("\u8349\u7A3F\u7EB8\u5DF2\u9690\u85CF");
-  }
-  async toggleDraftMode() {
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-    if (!view) {
-      new import_obsidian.Notice("\u53EA\u5728 Markdown \u89C6\u56FE\u4E2D\u53EF\u7528");
-      return;
-    }
-    if (view.getMode() !== "preview") {
-      this.app.commands.executeCommandById("markdown:toggle-preview");
-      await sleep(200);
-    }
-    if (this.isActive && this.draftMode !== "HIDDEN") {
-      this.setDraftMode("HIDDEN");
-    } else {
-      await this.syncCurrentFile();
-      await this.loadStrokes();
-      this.setDraftMode("DRAW");
-    }
-  }
-  // ==========================================================
-  //  工具重置
-  // ==========================================================
   resetToolState() {
-    this.activeStroke = null;
+    this.currentStroke = null;
     this.previewStroke = null;
-    if (this.toolMode !== "select") {
-      this.selectedIndices.clear();
-      this.selectRect = null;
-    }
-    this.lastFilteredPt = null;
-    this.renderAllStrokes();
+    this.scheduleRedraw();
   }
-  // ==========================================================
-  //  键盘事件
-  // ==========================================================
-  onKeyDown(e2) {
-    if (!this.isActive)
-      return;
-    const target = e2.target;
-    if (target.closest("input, textarea") || target.isContentEditable)
-      return;
-    if (e2.code === "Space" && this.draftMode === "DRAW" && !this.tempPointer) {
-      e2.preventDefault();
-      e2.stopPropagation();
-      this.tempPointer = true;
-      this.canvas.style.pointerEvents = "none";
-      this.canvas.style.cursor = "default";
-      return;
-    }
-    const toolMap = {
-      "1": "pen",
-      "2": "eraser",
-      "3": "select",
-      "4": "arrow",
-      "5": "rect",
-      "6": "text"
-    };
-    if (toolMap[e2.key]) {
-      e2.preventDefault();
-      e2.stopPropagation();
-      this.toolMode = toolMap[e2.key];
-      if (this.toolMode !== "eraser")
-        this.eraserSubToolbarEl.style.display = "none";
-      this.resetToolState();
-      this.updateToolbarActive();
-      return;
-    }
-    if (e2.key === "Escape") {
-      e2.preventDefault();
-      e2.stopPropagation();
-      if (this.selectedIndices.size > 0) {
-        this.selectedIndices.clear();
-        this.renderAllStrokes();
-      } else {
-        this.setDraftMode("HIDDEN");
-      }
-      return;
-    }
-    if ((e2.ctrlKey || e2.metaKey) && e2.key === "z") {
-      e2.preventDefault();
-      e2.stopPropagation();
-      this.undo();
-      return;
-    }
-    if ((e2.ctrlKey || e2.metaKey) && e2.shiftKey && e2.key === "Z") {
-      e2.preventDefault();
-      e2.stopPropagation();
-      this.clearAll();
-      return;
-    }
-    if ((e2.key === "Delete" || e2.key === "Backspace") && this.selectedIndices.size > 0) {
-      e2.preventDefault();
-      e2.stopPropagation();
-      this.deleteSelected();
-      return;
-    }
-    if (this.toolMode === "arrow" && (e2.key === "ArrowLeft" || e2.key === "ArrowRight")) {
-      e2.preventDefault();
-      const idx = ARROW_STYLES.indexOf(this.currentArrowStyle);
-      const next = e2.key === "ArrowRight" ? (idx + 1) % ARROW_STYLES.length : (idx - 1 + ARROW_STYLES.length) % ARROW_STYLES.length;
-      this.currentArrowStyle = ARROW_STYLES[next];
-      this.updateToolbarActive();
-    }
-  }
-  onKeyUp(e2) {
-    if (!this.isActive)
-      return;
-    if (e2.code === "Space" && this.tempPointer) {
-      this.tempPointer = false;
-      if (this.draftMode === "DRAW") {
-        this.canvas.style.pointerEvents = "auto";
-        this.canvas.style.cursor = this.toolMode === "eraser" ? "none" : this.toolMode === "text" ? "text" : "crosshair";
-      }
-    }
-  }
-  // ==========================================================
-  //  坐标转换
-  // ==========================================================
-  getCanvasPoint(e2) {
+  // ==================== 穿透 canvas ====================
+  getBlockFromPoint(x2, y2) {
     if (!this.canvas)
       return null;
-    const rect = this.canvas.getBoundingClientRect();
-    return { x: e2.clientX - rect.left, y: e2.clientY - rect.top };
+    const prevPE = this.canvas.style.pointerEvents;
+    this.canvas.style.pointerEvents = "none";
+    const elem = document.elementFromPoint(x2, y2);
+    this.canvas.style.pointerEvents = prevPE;
+    if (!elem)
+      return null;
+    return elem.closest(BLOCK_SELECTORS);
   }
-  // ==========================================================
-  //  指针事件路由
-  // ==========================================================
-  onPointerDown(e2) {
-    var _a, _b;
-    if (!this.isActive || this.draftMode !== "DRAW")
-      return;
-    if (e2.pointerType === "mouse" && e2.button !== 0)
-      return;
-    if ((_a = e2.target) == null ? void 0 : _a.closest(".draft-paper-toolbar-container"))
-      return;
-    (_b = this.canvas) == null ? void 0 : _b.focus();
-    const pt = this.getCanvasPoint(e2);
-    if (!pt)
-      return;
-    if (this.toolMode === "text") {
-      this.handleTextTool(pt);
-      return;
-    }
-    if (this.toolMode === "eraser") {
-      if (this.eraserMode === "stroke") {
-        this.eraserDown(pt);
-      }
-      return;
-    }
-    switch (this.toolMode) {
-      case "pen":
-        this.penDown(pt);
-        break;
-      case "select":
-        this.selectDown(pt);
-        break;
-      case "arrow":
-        this.arrowDown(pt);
-        break;
-      case "rect":
-        this.rectDown(pt);
-        break;
-    }
-  }
-  onPointerMove(e2) {
-    if (!this.isActive || this.draftMode !== "DRAW")
-      return;
-    e2.preventDefault();
-    const pt = this.getCanvasPoint(e2);
-    if (!pt)
-      return;
-    if (this.toolMode === "eraser" && this.eraserMode === "stroke" && this.eraserCursorEl) {
-      const size = ERASER_CURSOR_SIZE;
-      this.eraserCursorEl.style.left = `${e2.clientX - size / 2}px`;
-      this.eraserCursorEl.style.top = `${e2.clientY - size / 2}px`;
-      this.eraserCursorEl.style.width = `${size}px`;
-      this.eraserCursorEl.style.height = `${size}px`;
-    }
-    switch (this.toolMode) {
-      case "pen":
-        this.penMove(pt);
-        break;
-      case "eraser":
-        this.eraserMove(pt);
-        break;
-      case "select":
-        this.selectMove(pt);
-        break;
-      case "arrow":
-        this.arrowMove(pt);
-        break;
-      case "rect":
-        this.rectMove(pt);
-        break;
-    }
-  }
-  onPointerUp(e2) {
-    if (!this.isActive || this.draftMode !== "DRAW")
-      return;
-    const pt = this.getCanvasPoint(e2);
-    if (!pt)
-      return;
-    switch (this.toolMode) {
-      case "pen":
-        this.penUp(pt);
-        break;
-      case "eraser":
-        this.eraserUp(pt);
-        break;
-      case "select":
-        this.selectUp(pt);
-        break;
-      case "arrow":
-        this.arrowUp(pt);
-        break;
-      case "rect":
-        this.rectUp(pt);
-        break;
-    }
-  }
-  // ==========================================================
-  //  工具实现
-  // ==========================================================
-  // ---------- 画笔 (perfect-freehand 平滑) ----------
-  penDown(pt) {
-    this.lastFilteredPt = pt;
-    this.activeStroke = {
-      points: [pt],
-      color: this.currentColor,
-      lineWidth: this.currentLineWidth,
-      opacity: this.currentOpacity,
-      timestamp: Date.now(),
-      type: "freehand"
-    };
-    this.renderDot(pt);
-  }
-  penMove(pt) {
-    if (!this.activeStroke || !this.lastFilteredPt)
-      return;
-    const alpha = 0.35;
-    const filtered = {
-      x: this.lastFilteredPt.x + (pt.x - this.lastFilteredPt.x) * alpha,
-      y: this.lastFilteredPt.y + (pt.y - this.lastFilteredPt.y) * alpha
-    };
-    this.lastFilteredPt = filtered;
-    const pts = this.activeStroke.points;
-    const last = pts[pts.length - 1];
-    if (dist(last, filtered) < 1)
-      return;
-    pts.push(filtered);
-    this.renderAllStrokes();
-  }
-  penUp(_pt) {
-    this.lastFilteredPt = null;
-    if (this.activeStroke)
-      this.finishStroke();
-  }
-  renderDot(pt) {
-    if (!this.ctx)
-      return;
-    this.ctx.save();
-    this.ctx.globalAlpha = this.currentOpacity;
-    this.ctx.fillStyle = this.currentColor;
-    this.ctx.beginPath();
-    this.ctx.arc(pt.x, pt.y, this.currentLineWidth / 2, 0, Math.PI * 2);
-    this.ctx.fill();
-    this.ctx.restore();
-  }
-  // ---------- 橡皮擦（整笔删除） ----------
-  eraserDown(pt) {
-    this.pushUndo();
-    this.eraserDelete(pt);
-  }
-  eraserMove(pt) {
-    this.eraserDelete(pt);
-  }
-  eraserUp(_pt) {
-    this.saveStrokes();
-  }
-  eraserDelete(pt) {
-    const newStrokes = this.strokes.filter((s2) => pointToStrokeDist(pt, s2) > ERASER_HIT_DISTANCE);
-    if (newStrokes.length !== this.strokes.length) {
-      this.strokes = newStrokes;
-      this.selectedIndices.clear();
-      this.renderAllStrokes();
-    }
-  }
-  // ---------- 选择工具 ----------
-  selectDown(pt) {
-    if (this.selectedIndices.size > 0) {
-      const selStrokes = [...this.selectedIndices].map((i2) => this.strokes[i2]);
-      const hit = selStrokes.some((s2) => s2.points.some((p2) => dist(p2, pt) < 8));
-      if (hit) {
-        this.moveStart = pt;
-        this.moveOriginStrokes = selStrokes.map((s2) => s2.points.map((p2) => ({ ...p2 })));
-        return;
-      }
-    }
-    this.selectedIndices.clear();
-    this.selectStart = pt;
-    this.selectRect = { x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y };
-  }
-  selectMove(pt) {
-    if (this.moveStart && this.moveOriginStrokes) {
-      const dx = pt.x - this.moveStart.x;
-      const dy = pt.y - this.moveStart.y;
-      const indices = [...this.selectedIndices];
-      for (let j2 = 0; j2 < indices.length; j2++) {
-        const origPoints = this.moveOriginStrokes[j2];
-        const stroke = this.strokes[indices[j2]];
-        for (let i2 = 0; i2 < stroke.points.length; i2++) {
-          stroke.points[i2] = { x: origPoints[i2].x + dx, y: origPoints[i2].y + dy };
-        }
-      }
-      this.renderAllStrokes();
-      return;
-    }
-    if (this.selectRect) {
-      this.selectRect.x2 = pt.x;
-      this.selectRect.y2 = pt.y;
-      this.renderAllStrokes();
-    }
-  }
-  selectUp(pt) {
-    if (this.moveStart && this.moveOriginStrokes) {
-      const dx = pt.x - this.moveStart.x;
-      const dy = pt.y - this.moveStart.y;
-      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
-        this.pushUndo();
-        this.saveStrokes();
-      }
-      this.moveStart = null;
-      this.moveOriginStrokes = null;
-      this.renderAllStrokes();
-      return;
-    }
-    if (this.selectRect) {
-      for (let i2 = 0; i2 < this.strokes.length; i2++) {
-        if (strokeInRect(this.strokes[i2], this.selectRect.x1, this.selectRect.y1, this.selectRect.x2, this.selectRect.y2))
-          this.selectedIndices.add(i2);
-      }
-      this.selectRect = null;
-      this.selectStart = null;
-      this.renderAllStrokes();
-    }
-  }
-  // ---------- 箭头 ----------
-  arrowDown(pt) {
-    this.previewStroke = {
-      points: [pt, pt],
-      color: this.currentColor,
-      lineWidth: this.currentLineWidth,
-      opacity: this.currentOpacity,
-      timestamp: Date.now(),
-      type: "arrow",
-      arrowStyle: this.currentArrowStyle
-    };
-  }
-  arrowMove(pt) {
-    if (!this.previewStroke)
-      return;
-    this.previewStroke.points[1] = pt;
-    this.renderAllStrokes();
-  }
-  arrowUp(pt) {
-    if (!this.previewStroke)
-      return;
-    this.previewStroke.points[1] = pt;
-    if (dist(this.previewStroke.points[0], pt) > 3) {
-      this.pushUndo();
-      this.strokes.push({ ...this.previewStroke, arrowStyle: this.currentArrowStyle });
-      this.saveStrokes();
-    }
-    this.previewStroke = null;
-    this.renderAllStrokes();
-  }
-  // ---------- 矩形 ----------
-  rectDown(pt) {
-    this.previewStroke = {
-      points: [pt, pt],
-      color: this.currentColor,
-      lineWidth: this.currentLineWidth,
-      opacity: this.currentOpacity,
-      timestamp: Date.now(),
-      type: "rect"
-    };
-  }
-  rectMove(pt) {
-    if (!this.previewStroke)
-      return;
-    this.previewStroke.points[1] = pt;
-    this.renderAllStrokes();
-  }
-  rectUp(pt) {
-    if (!this.previewStroke)
-      return;
-    this.previewStroke.points[1] = pt;
-    const [a2, b2] = this.previewStroke.points;
-    if (Math.abs(b2.x - a2.x) > 3 || Math.abs(b2.y - a2.y) > 3) {
-      this.pushUndo();
-      this.strokes.push({ ...this.previewStroke });
-      this.saveStrokes();
-    }
-    this.previewStroke = null;
-    this.renderAllStrokes();
-  }
-  // ---------- 文字 ----------
-  handleTextTool(pt) {
-    const input = document.createElement("textarea");
-    input.style.position = "fixed";
-    input.style.left = `${pt.x}px`;
-    input.style.top = `${pt.y}px`;
-    input.style.zIndex = "10002";
-    input.style.minWidth = "80px";
-    input.style.border = "1px dashed var(--interactive-accent)";
-    input.style.background = "var(--background-primary)";
-    input.style.padding = "4px";
-    input.style.fontSize = "16px";
-    input.style.resize = "both";
-    document.body.appendChild(input);
-    input.focus();
-    const cleanup = () => {
-      const text = input.value.trim();
-      input.remove();
-      if (text) {
-        const newStroke = {
-          points: [pt],
-          color: this.currentColor,
-          lineWidth: this.currentLineWidth,
-          opacity: this.currentOpacity,
-          timestamp: Date.now(),
-          type: "text",
-          text,
-          fontSize: 16
-        };
-        this.pushUndo();
-        this.strokes.push(newStroke);
-        this.saveStrokes();
-        this.renderAllStrokes();
-      }
-    };
-    input.addEventListener("blur", cleanup);
-    input.addEventListener("keydown", (e2) => {
-      if (e2.key === "Escape") {
-        input.remove();
-      } else if (e2.key === "Enter" && !e2.shiftKey) {
-        e2.preventDefault();
-        cleanup();
-      }
+  // ==================== 工具 ====================
+  eraseAt(block, p2, rect) {
+    const key = getBlockKey(block);
+    const absPt = { x: p2.x + rect.left, y: p2.y + rect.top };
+    this.strokes = this.strokes.filter((s2) => {
+      if (s2.blockKey !== key)
+        return true;
+      return !s2.points.some((pt) => dist({ x: pt.x + rect.left, y: pt.y + rect.top }, absPt) < ERASER_HIT_DISTANCE);
     });
-  }
-  // ---------- 笔画完成 ----------
-  finishStroke() {
-    if (!this.activeStroke || this.activeStroke.points.length < 2) {
-      this.activeStroke = null;
-      return;
-    }
-    this.pushUndo();
-    this.strokes.push(this.activeStroke);
-    this.activeStroke = null;
+    this.scheduleRedraw();
     this.saveStrokes();
   }
-  // ---------- 删除选中 ----------
-  async deleteSelected() {
-    if (this.selectedIndices.size === 0)
-      return;
-    this.pushUndo();
-    const sorted = [...this.selectedIndices].sort((a2, b2) => b2 - a2);
-    for (const i2 of sorted)
-      this.strokes.splice(i2, 1);
-    this.selectedIndices.clear();
-    this.renderAllStrokes();
-    await this.saveStrokes();
-  }
-  // ---------- 清空全部（保留撤销） ----------
   clearAll() {
     if (this.strokes.length === 0)
       return;
     this.pushUndo();
     this.strokes = [];
-    this.selectedIndices.clear();
-    this.renderAllStrokes();
+    this.scheduleRedraw();
     this.saveStrokes();
     new import_obsidian.Notice("\u753B\u5E03\u5DF2\u6E05\u7A7A\uFF0C\u53EF\u6309 Ctrl+Z \u6062\u590D");
   }
-  // 清空确认对话框
   confirmClearAll() {
     const modal = new import_obsidian.Modal(this.app);
-    modal.titleEl.setText("\u786E\u8BA4\u6E05\u7A7A\u8349\u7A3F");
-    modal.contentEl.createEl("p", { text: "\u662F\u5426\u6E05\u7A7A\u5F53\u524D\u6587\u4EF6\u7684\u6240\u6709\u624B\u5199\u4E0E\u6807\u6CE8\uFF1F" });
-    modal.contentEl.createEl("p", { text: "\uFF08\u53EF\u901A\u8FC7 Ctrl+Z \u6062\u590D\uFF09", cls: "mod-warning" });
-    const btnContainer = modal.contentEl.createDiv({ cls: "modal-button-container" });
-    const confirmBtn = btnContainer.createEl("button", { text: "\u786E\u8BA4\u6E05\u7A7A" });
-    const cancelBtn = btnContainer.createEl("button", { text: "\u53D6\u6D88" });
-    confirmBtn.addEventListener("click", () => {
+    modal.titleEl.setText("\u786E\u8BA4\u6E05\u7A7A");
+    modal.contentEl.createEl("p", { text: "\u6E05\u7A7A\u5F53\u524D\u6587\u4EF6\u6240\u6709\u6279\u6CE8\uFF1F" });
+    const btns = modal.contentEl.createDiv();
+    btns.createEl("button", { text: "\u786E\u8BA4" }).addEventListener("click", () => {
       this.clearAll();
       modal.close();
     });
-    cancelBtn.addEventListener("click", () => modal.close());
+    btns.createEl("button", { text: "\u53D6\u6D88" }).addEventListener("click", () => modal.close());
     modal.open();
   }
-  // ==========================================================
-  //  绘制引擎
-  // ==========================================================
-  drawPerfectFreehand(ctx, stroke) {
-    var _a;
-    if (stroke.points.length < 2)
+  textAt(block, p2) {
+    const rect = block.getBoundingClientRect();
+    const input = document.createElement("textarea");
+    Object.assign(input.style, {
+      position: "fixed",
+      left: `${rect.left + p2.x}px`,
+      top: `${rect.top + p2.y}px`,
+      zIndex: "10002",
+      minWidth: "80px",
+      border: "1px dashed var(--interactive-accent)",
+      background: "var(--background-primary)",
+      padding: "4px",
+      fontSize: "16px",
+      resize: "both"
+    });
+    document.body.appendChild(input);
+    input.focus();
+    const done = () => {
+      const text = input.value.trim();
+      input.remove();
+      if (text) {
+        this.pushUndo();
+        this.strokes.push({
+          type: "text",
+          blockKey: getBlockKey(block),
+          points: [p2],
+          color: this.color,
+          lineWidth: this.lineWidth,
+          opacity: this.opacity,
+          timestamp: Date.now(),
+          text,
+          fontSize: 16
+        });
+        this.saveStrokes();
+        this.scheduleRedraw();
+      }
+    };
+    input.addEventListener("blur", done);
+    input.addEventListener("keydown", (e2) => {
+      if (e2.key === "Escape")
+        input.remove();
+      else if (e2.key === "Enter" && !e2.shiftKey) {
+        e2.preventDefault();
+        done();
+      }
+    });
+  }
+  redraw() {
+    if (!this.ctx || !this.canvas)
       return;
-    const outline = R(
-      stroke.points.map((p2) => [p2.x, p2.y]),
-      { ...FREEHAND_OPTIONS, size: stroke.lineWidth * 2.2 }
-    );
-    if (!outline.length)
+    const dpr = window.devicePixelRatio || 1;
+    this.ctx.clearRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
+    const blockMap = /* @__PURE__ */ new Map();
+    document.querySelectorAll(BLOCK_SELECTORS).forEach((el) => {
+      const key = getBlockKey(el);
+      if (key)
+        blockMap.set(key, el.getBoundingClientRect());
+    });
+    for (const s2 of this.strokes) {
+      const rect = blockMap.get(s2.blockKey);
+      if (rect)
+        this.drawStroke(s2, rect);
+    }
+    if (this.currentStroke) {
+      const rect = blockMap.get(this.currentStroke.blockKey);
+      if (rect)
+        this.drawStroke(this.currentStroke, rect);
+    }
+    if (this.previewStroke) {
+      const rect = blockMap.get(this.previewStroke.blockKey);
+      if (rect)
+        this.drawStroke(this.previewStroke, rect);
+    }
+  }
+  drawStroke(stroke, blockRect) {
+    if (!this.ctx || stroke.points.length < 1)
       return;
+    const absPts = stroke.points.map((p2) => ({ x: p2.x + blockRect.left, y: p2.y + blockRect.top }));
+    if (stroke.type === "pen" || stroke.type === "highlighter") {
+      const outline = R(
+        absPts.map((p2) => [p2.x, p2.y]),
+        { ...FREEHAND_OPTIONS, size: stroke.lineWidth * 2.2 }
+      );
+      if (!outline.length)
+        return;
+      const ctx = this.ctx;
+      ctx.save();
+      if (stroke.type === "highlighter")
+        ctx.globalCompositeOperation = "multiply";
+      ctx.globalAlpha = stroke.opacity;
+      ctx.fillStyle = stroke.color;
+      ctx.beginPath();
+      ctx.moveTo(outline[0][0], outline[0][1]);
+      for (let i2 = 1; i2 < outline.length; i2++)
+        ctx.lineTo(outline[i2][0], outline[i2][1]);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    } else if (stroke.type === "arrow") {
+      this.drawArrowStroke(stroke, blockRect);
+    } else if (stroke.type === "rect") {
+      const [a2, b2] = absPts;
+      const ctx = this.ctx;
+      ctx.save();
+      ctx.strokeStyle = stroke.color;
+      ctx.lineWidth = stroke.lineWidth;
+      ctx.globalAlpha = stroke.opacity;
+      ctx.strokeRect(Math.min(a2.x, b2.x), Math.min(a2.y, b2.y), Math.abs(b2.x - a2.x), Math.abs(b2.y - a2.y));
+      ctx.restore();
+    } else if (stroke.type === "text") {
+      const pt = absPts[0];
+      const ctx = this.ctx;
+      ctx.save();
+      ctx.fillStyle = stroke.color;
+      ctx.globalAlpha = stroke.opacity;
+      ctx.font = `${stroke.fontSize || 16}px sans-serif`;
+      ctx.fillText(stroke.text || "", pt.x, pt.y);
+      ctx.restore();
+    }
+  }
+  drawArrowStroke(stroke, blockRect) {
+    if (!this.ctx)
+      return;
+    const [a2, b2] = stroke.points.map((p2) => ({ x: p2.x + blockRect.left, y: p2.y + blockRect.top }));
+    const style = stroke.arrowStyle || "straight";
+    const ctx = this.ctx;
     ctx.save();
-    ctx.globalAlpha = (_a = stroke.opacity) != null ? _a : 1;
-    ctx.fillStyle = stroke.color;
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.lineWidth;
+    ctx.globalAlpha = stroke.opacity;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    if (style === "dashed")
+      ctx.setLineDash([8, 4]);
     ctx.beginPath();
-    ctx.moveTo(outline[0][0], outline[0][1]);
-    for (let i2 = 1; i2 < outline.length; i2++)
-      ctx.lineTo(outline[i2][0], outline[i2][1]);
-    ctx.closePath();
-    ctx.fill();
+    if (style === "curved") {
+      const cx = (a2.x + b2.x) / 2 + (b2.y - a2.y) * 0.2;
+      const cy = (a2.y + b2.y) / 2 - (b2.x - a2.x) * 0.2;
+      ctx.moveTo(a2.x, a2.y);
+      ctx.quadraticCurveTo(cx, cy, b2.x, b2.y);
+    } else {
+      ctx.moveTo(a2.x, a2.y);
+      ctx.lineTo(b2.x, b2.y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const headSize = Math.max(6, stroke.lineWidth * 4);
+    this.drawArrowHead(ctx, a2, b2, stroke.color, headSize);
+    if (style === "double")
+      this.drawArrowHead(ctx, b2, a2, stroke.color, headSize);
     ctx.restore();
   }
   drawArrowHead(ctx, from, to, color, size) {
@@ -1157,118 +811,7 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     ctx.fill();
     ctx.restore();
   }
-  drawArrowStroke(ctx, stroke) {
-    var _a;
-    if (stroke.points.length < 2)
-      return;
-    const [p1, p2] = stroke.points;
-    const style = stroke.arrowStyle || "straight";
-    ctx.save();
-    ctx.strokeStyle = stroke.color;
-    ctx.lineWidth = stroke.lineWidth;
-    ctx.globalAlpha = (_a = stroke.opacity) != null ? _a : 1;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    if (style === "dashed")
-      ctx.setLineDash([8, 4]);
-    else
-      ctx.setLineDash([]);
-    ctx.beginPath();
-    if (style === "curved") {
-      const cx = (p1.x + p2.x) / 2 + (p2.y - p1.y) * 0.2;
-      const cy = (p1.y + p2.y) / 2 - (p2.x - p1.x) * 0.2;
-      ctx.moveTo(p1.x, p1.y);
-      ctx.quadraticCurveTo(cx, cy, p2.x, p2.y);
-    } else {
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-    const headSize = Math.max(6, stroke.lineWidth * 4);
-    this.drawArrowHead(ctx, p1, p2, stroke.color, headSize);
-    if (style === "double") {
-      this.drawArrowHead(ctx, p2, p1, stroke.color, headSize);
-    }
-    ctx.restore();
-  }
-  drawStroke(ctx, stroke, highlight) {
-    var _a, _b;
-    if (stroke.type === "freehand") {
-      if (highlight) {
-        const xs = stroke.points.map((p2) => p2.x);
-        const ys = stroke.points.map((p2) => p2.y);
-        const minX = Math.min(...xs), maxX = Math.max(...xs);
-        const minY = Math.min(...ys), maxY = Math.max(...ys);
-        ctx.save();
-        ctx.strokeStyle = "#3399ff";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([6, 3]);
-        ctx.strokeRect(minX - 6, minY - 6, maxX - minX + 12, maxY - minY + 12);
-        ctx.setLineDash([]);
-        ctx.restore();
-      }
-      this.drawPerfectFreehand(ctx, stroke);
-    } else if (stroke.type === "arrow") {
-      this.drawArrowStroke(ctx, stroke);
-    } else if (stroke.type === "rect") {
-      const [a2, b2] = stroke.points;
-      ctx.save();
-      ctx.strokeStyle = stroke.color;
-      ctx.lineWidth = stroke.lineWidth;
-      ctx.globalAlpha = (_a = stroke.opacity) != null ? _a : 1;
-      ctx.beginPath();
-      ctx.rect(Math.min(a2.x, b2.x), Math.min(a2.y, b2.y), Math.abs(b2.x - a2.x), Math.abs(b2.y - a2.y));
-      ctx.stroke();
-      ctx.restore();
-    } else if (stroke.type === "text") {
-      ctx.save();
-      ctx.fillStyle = stroke.color;
-      ctx.globalAlpha = (_b = stroke.opacity) != null ? _b : 1;
-      ctx.font = `${stroke.fontSize || 16}px sans-serif`;
-      ctx.fillText(stroke.text || "", stroke.points[0].x, stroke.points[0].y);
-      ctx.restore();
-    }
-    if (highlight && stroke.type !== "freehand") {
-      const pts = stroke.points;
-      const xs = pts.map((p2) => p2.x), ys = pts.map((p2) => p2.y);
-      const minX = Math.min(...xs), maxX = Math.max(...xs);
-      const minY = Math.min(...ys), maxY = Math.max(...ys);
-      ctx.save();
-      ctx.strokeStyle = "#3399ff";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 3]);
-      ctx.strokeRect(minX - 4, minY - 4, maxX - minX + 8, maxY - minY + 8);
-      ctx.setLineDash([]);
-      ctx.restore();
-    }
-  }
-  renderAllStrokes() {
-    if (!this.ctx || !this.canvas)
-      return;
-    const dpr = window.devicePixelRatio || 1;
-    this.ctx.clearRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
-    for (let i2 = 0; i2 < this.strokes.length; i2++) {
-      this.drawStroke(this.ctx, this.strokes[i2], this.selectedIndices.has(i2));
-    }
-    if (this.activeStroke)
-      this.drawStroke(this.ctx, this.activeStroke, false);
-    if (this.previewStroke)
-      this.drawStroke(this.ctx, this.previewStroke, false);
-    if (this.selectRect) {
-      const { x1, y1, x2, y2 } = this.selectRect;
-      this.ctx.save();
-      this.ctx.strokeStyle = "#3399ff";
-      this.ctx.lineWidth = 1.5;
-      this.ctx.setLineDash([6, 3]);
-      this.ctx.strokeRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
-      this.ctx.setLineDash([]);
-      this.ctx.restore();
-    }
-  }
-  // ==========================================================
-  //  存储（同级目录 draft-paper 文件夹）
-  // ==========================================================
+  // ==================== 存储 ====================
   getDraftDir() {
     if (!this.currentFilePath)
       return "";
@@ -1284,67 +827,52 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     return name.replace(/\.md$/i, ".json");
   }
   async loadStrokes() {
-    const dir = this.getDraftDir();
-    const fn = this.getDraftFileName();
-    if (!dir || !fn) {
+    if (!this.currentFilePath) {
       this.strokes = [];
       return;
     }
+    const path = `${this.getDraftDir()}/${this.getDraftFileName()}`;
     try {
-      const raw = await this.app.vault.adapter.read(`${dir}/${fn}`);
-      this.strokes = JSON.parse(raw);
+      this.strokes = JSON.parse(await this.app.vault.adapter.read(path));
     } catch (e2) {
       this.strokes = [];
     }
   }
   async saveStrokes() {
-    const dir = this.getDraftDir();
-    const fn = this.getDraftFileName();
-    if (!dir || !fn)
+    if (!this.currentFilePath)
       return;
+    const path = `${this.getDraftDir()}/${this.getDraftFileName()}`;
     try {
-      await this.app.vault.adapter.mkdir(dir);
+      await this.app.vault.adapter.mkdir(this.getDraftDir());
     } catch (e2) {
     }
     try {
-      await this.app.vault.adapter.write(`${dir}/${fn}`, JSON.stringify(this.strokes));
+      await this.app.vault.adapter.write(path, JSON.stringify(this.strokes));
     } catch (err) {
-      console.error("[DraftPaper] save failed:", err);
+      console.error("\u8349\u7A3F\u4FDD\u5B58\u5931\u8D25:", err);
     }
   }
-  async syncCurrentFile() {
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
-    if (!(view == null ? void 0 : view.file))
-      return;
-    const newPath = view.file.path;
-    if (newPath === this.currentFilePath)
-      return;
-    if (this.currentFilePath)
-      await this.saveStrokes();
-    this.currentFilePath = newPath;
-    this.undoStack = [];
-    this.selectedIndices.clear();
-    this.selectRect = null;
-    await this.loadStrokes();
-    this.activeStroke = null;
-    this.renderAllStrokes();
-  }
-  // ==========================================================
-  //  撤销系统
-  // ==========================================================
+  // ==================== 撤销/重做 ====================
   pushUndo() {
-    this.undoStack.push(
-      this.strokes.map((s2) => ({ ...s2, points: s2.points.map((p2) => ({ ...p2 })) }))
-    );
+    this.undoStack.push(JSON.parse(JSON.stringify(this.strokes)));
     if (this.undoStack.length > this.MAX_UNDO)
       this.undoStack.shift();
+    this.redoStack = [];
   }
-  async undo() {
-    if (!this.undoStack.length)
+  undo() {
+    if (this.undoStack.length === 0)
       return;
+    this.redoStack.push(JSON.parse(JSON.stringify(this.strokes)));
     this.strokes = this.undoStack.pop();
-    this.selectedIndices.clear();
-    this.renderAllStrokes();
-    await this.saveStrokes();
+    this.scheduleRedraw();
+    this.saveStrokes();
+  }
+  redo() {
+    if (this.redoStack.length === 0)
+      return;
+    this.undoStack.push(JSON.parse(JSON.stringify(this.strokes)));
+    this.strokes = this.redoStack.pop();
+    this.scheduleRedraw();
+    this.saveStrokes();
   }
 };

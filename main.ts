@@ -4,39 +4,30 @@ import { getStroke } from "perfect-freehand";
 // ============================================================
 //  类型定义
 // ============================================================
-
-interface Point {
-    x: number;
-    y: number;
-}
-
-type ArrowStyle = "straight" | "curved" | "dashed" | "double";
-type ToolMode = "pen" | "eraser" | "select" | "arrow" | "rect" | "text";
-type DraftMode = "DRAW" | "POINTER" | "HIDDEN";
-type EraserMode = "stroke" | "clear-selected" | "clear-all";
+interface Point { x: number; y: number; }
 
 interface Stroke {
+    type: "pen" | "highlighter" | "arrow" | "rect" | "text";
+    blockKey: string;
     points: Point[];
     color: string;
     lineWidth: number;
     opacity: number;
     timestamp: number;
-    type: "freehand" | "arrow" | "rect" | "text";
     text?: string;
     fontSize?: number;
     arrowStyle?: ArrowStyle;
 }
 
-// ============================================================
-//  常量
-// ============================================================
+type ArrowStyle = "straight" | "curved" | "dashed" | "double";
+type ToolMode = "pen" | "highlighter" | "eraser" | "arrow" | "rect" | "text" | "hand";
+type EraserMode = "stroke" | "clear-all";
 
 const DEFAULT_COLOR = "#ff3333";
 const DEFAULT_LINE_WIDTH = 2.5;
-const DEFAULT_OPACITY = 1;
-const ERASER_HIT_DISTANCE = 12;           // 整笔擦除阈值
-const ERASER_CURSOR_SIZE = 24;
-
+const HIGHLIGHTER_COLOR = "#ffeb3b";
+const HIGHLIGHTER_OPACITY = 0.25;
+const ERASER_HIT_DISTANCE = 15;
 const FREEHAND_OPTIONS = {
     size: 1,
     thinning: 0.6,
@@ -47,203 +38,121 @@ const FREEHAND_OPTIONS = {
     start: { taper: 0, cap: true },
     end: { taper: 0, cap: true },
 };
-
-const ARROW_STYLES: ArrowStyle[] = ["straight", "curved", "dashed", "double"];
 const ARROW_HEAD_SIZE = 12;
+const BLOCK_SELECTORS = "p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, .math-block, .callout";
 
-// ============================================================
-//  辅助函数
-// ============================================================
-
-function sleep(ms: number): Promise<void> {
-    return new Promise(r => setTimeout(r, ms));
+function getBlockKey(el: HTMLElement): string {
+    return el.textContent?.trim().substring(0, 60) || "";
 }
 
-function dist(a: Point, b: Point): number {
-    return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function distToSegment(p: Point, a: Point, b: Point): number {
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const lenSq = dx * dx + dy * dy;
-    if (lenSq === 0) return dist(p, a);
-    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
-    t = Math.max(0, Math.min(1, t));
-    return dist(p, { x: a.x + t * dx, y: a.y + t * dy });
-}
-
-// 点到整条笔画的最近距离
-function pointToStrokeDist(p: Point, stroke: Stroke): number {
-    let minDist = Infinity;
-    for (let i = 0; i < stroke.points.length - 1; i++) {
-        const d = distToSegment(p, stroke.points[i], stroke.points[i + 1]);
-        if (d < minDist) minDist = d;
-    }
-    if (stroke.points.length === 1) {
-        minDist = dist(p, stroke.points[0]);
-    }
-    return minDist;
-}
-
-function strokeInRect(s: Stroke, x1: number, y1: number, x2: number, y2: number): boolean {
-    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
-    const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
-    return s.points.some(p => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY);
-}
-
-// ============================================================
-//  插件主体
-// ============================================================
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+function dist(a: Point, b: Point) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
 export default class DraftPaperPlugin extends Plugin {
-    // DOM 元素
-    private overlay: HTMLElement | null = null;
+    private active = false;
+    private isDrawing = true;
+    private tool: ToolMode = "pen";
+    private eraserMode: EraserMode = "stroke";
     private canvas: HTMLCanvasElement | null = null;
     private ctx: CanvasRenderingContext2D | null = null;
-    private toolbarContainer: HTMLElement | null = null;      // 独立工具栏容器
-    private eraserCursorEl: HTMLElement | null = null;
-    private eraserSubToolbarEl: HTMLElement | null = null;
-    private eraserBtnEl: HTMLElement | null = null;
-
-    // 状态
-    private isActive = false;
-    private draftMode: DraftMode = "DRAW";
-    private toolMode: ToolMode = "pen";
-    private eraserMode: EraserMode = "stroke";
-
-    private currentFilePath = "";
     private strokes: Stroke[] = [];
-    private activeStroke: Stroke | null = null;
-    private currentColor = DEFAULT_COLOR;
-    private currentLineWidth = DEFAULT_LINE_WIDTH;
-    private currentOpacity = DEFAULT_OPACITY;
-    private currentArrowStyle: ArrowStyle = "straight";
-
-    // 临时透传标记
-    private tempPointer = false;
-
-    // 选择系统
-    private selectedIndices: Set<number> = new Set();
-    private selectRect: { x1: number; y1: number; x2: number; y2: number } | null = null;
-    private selectStart: Point | null = null;
-    private moveStart: Point | null = null;
-    private moveOriginStrokes: Point[][] | null = null;
-
-    // 预览（箭头/矩形）
+    private currentStroke: Stroke | null = null;
     private previewStroke: Stroke | null = null;
-
-    // 撤销栈
+    private toolbar: HTMLElement | null = null;
+    private color = DEFAULT_COLOR;
+    private lineWidth = DEFAULT_LINE_WIDTH;
+    private opacity = 1;
+    private arrowStyle: ArrowStyle = "straight";
+    private rafPending = false;
+    private currentFilePath = "";
     private undoStack: Stroke[][] = [];
-    private readonly MAX_UNDO = 50;
+    private redoStack: Stroke[][] = [];
+    private readonly MAX_UNDO = 100;
 
-    // 低通滤波（手写平滑）
-    private lastFilteredPt: Point | null = null;
-
-    // 事件引用
-    private boundPointerDown: (e: PointerEvent) => void;
-    private boundPointerMove: (e: PointerEvent) => void;
-    private boundPointerUp: (e: PointerEvent) => void;
-    private boundKeyDown: (e: KeyboardEvent) => void;
-    private boundKeyUp: (e: KeyboardEvent) => void;
-
-    constructor(app: any, manifest: any) {
-        super(app, manifest);
-        this.boundPointerDown = this.onPointerDown.bind(this);
-        this.boundPointerMove = this.onPointerMove.bind(this);
-        this.boundPointerUp = this.onPointerUp.bind(this);
-        this.boundKeyDown = this.onKeyDown.bind(this);
-        this.boundKeyUp = this.onKeyUp.bind(this);
-    }
-
-    // ==========================================================
-    //  生命周期
-    // ==========================================================
     async onload() {
-        this.createOverlay();
-
-        this.addCommand({
-            id: "toggle-draft-mode",
-            name: "Toggle Draft Mode",
-            callback: () => this.toggleDraftMode(),
-        });
-        this.addCommand({
-            id: "exit-draft-mode-force",
-            name: "Exit Draft Mode (Force)",
-            callback: async () => this.setDraftMode("HIDDEN"),
-        });
-        this.addRibbonIcon("pencil", "Toggle Draft Paper", () => this.toggleDraftMode());
-
-        this.registerEvent(
-            this.app.workspace.on("active-leaf-change", () => this.syncCurrentFile()),
-        );
-
-        document.addEventListener("keydown", this.boundKeyDown, true);
-        document.addEventListener("keyup", this.boundKeyUp, true);
-        await this.syncCurrentFile();
+        this.addRibbonIcon("pencil", "草稿纸", () => this.toggle());
+        this.addCommand({ id: "toggle-draft", name: "切换草稿纸", callback: () => this.toggle() });
+        this.registerDomEvent(window, "scroll", this.scheduleRedraw, true);
+        this.registerDomEvent(window, "resize", this.scheduleRedraw);
+        this.registerEvent(this.app.workspace.on("active-leaf-change", () => {
+            if (this.active) this.scheduleRedraw();
+        }));
     }
 
     async onunload() {
-        this.setDraftMode("HIDDEN");
-        this.detachOverlay();
-        document.removeEventListener("keydown", this.boundKeyDown, true);
-        document.removeEventListener("keyup", this.boundKeyUp, true);
+        this.disable();
     }
 
-    // ==========================================================
-    //  Overlay 与 Canvas 管理
-    // ==========================================================
-    private createOverlay() {
-        this.detachOverlay();
+    private toggle() {
+        if (this.active) { this.disable(); } else { this.enable(); }
+    }
 
-        // Overlay 仅包含 canvas 和橡皮擦光标
-        this.overlay = document.createElement("div");
-        this.overlay.className = "draft-paper-overlay";
-        this.overlay.style.display = "none";
+    private enable() {
+        if (this.active) return;
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) { new Notice("请先打开一个 Markdown 文件进入阅读模式"); return; }
+        if (view.getMode() !== "preview") {
+            (this.app as any).commands.executeCommandById("markdown:toggle-preview");
+            setTimeout(() => this.enable(), 200);
+            return;
+        }
+        this.currentFilePath = view.file?.path || "";
+        this.loadStrokes();
+        this.init();
+    }
 
-        this.canvas = document.createElement("canvas");
-        this.canvas.className = "draft-paper-canvas";
-        this.canvas.tabIndex = 0;
-        this.ctx = this.canvas.getContext("2d")!;
-        this.overlay.appendChild(this.canvas);
-
-        // 橡皮擦光标（在 overlay 内，但位置独立）
-        this.eraserCursorEl = document.createElement("div");
-        this.eraserCursorEl.className = "draft-paper-eraser-cursor";
-        this.eraserCursorEl.style.display = "none";
-        this.overlay.appendChild(this.eraserCursorEl);
-
-        document.body.appendChild(this.overlay);
-
-        // 工具栏独立容器，挂载到 body，与 overlay 平级
-        this.toolbarContainer = document.createElement("div");
-        this.toolbarContainer.className = "draft-paper-toolbar-container";
-        document.body.appendChild(this.toolbarContainer);
-        this.buildToolbar();
-
-        // resize 监听
-        this.registerDomEvent(window, "resize", () => {
-            this.resizeCanvas();
-            this.renderAllStrokes();
+    private init() {
+        const canvas = document.createElement("canvas");
+        canvas.id = "draft-paper-canvas";
+        Object.assign(canvas.style, {
+            position: "fixed",
+            top: "0",
+            left: "0",
+            width: "100vw",
+            height: "100vh",
+            zIndex: "5",
+            pointerEvents: this.isDrawing ? "auto" : "none",
+            touchAction: "none",
+            background: "transparent",
         });
+        document.body.appendChild(canvas);
+        this.canvas = canvas;
+        this.ctx = canvas.getContext("2d")!;
+        this.syncCanvasSize();
+
+        canvas.addEventListener("pointerdown", this.onPointerDown);
+        canvas.addEventListener("pointermove", this.onPointerMove);
+        canvas.addEventListener("pointerup", this.onPointerUp);
+        canvas.addEventListener("pointerleave", this.onPointerUp);
+
+        this.createToolbar();
+        this.active = true;
+        this.isDrawing = true;
+        this.tool = "pen";
+        this.eraserMode = "stroke";
+        this.updateModeUI();
+        this.scheduleRedraw();
     }
 
-    private detachOverlay() {
-        if (this.overlay) {
-            this.overlay.remove();
-            this.overlay = null;
+    private disable() {
+        if (!this.active) return;
+        this.saveStrokes();
+        if (this.canvas) {
+            this.canvas.removeEventListener("pointerdown", this.onPointerDown);
+            this.canvas.removeEventListener("pointermove", this.onPointerMove);
+            this.canvas.removeEventListener("pointerup", this.onPointerUp);
+            this.canvas.removeEventListener("pointerleave", this.onPointerUp);
+            this.canvas.remove();
             this.canvas = null;
             this.ctx = null;
-            this.eraserCursorEl = null;
         }
-        if (this.toolbarContainer) {
-            this.toolbarContainer.remove();
-            this.toolbarContainer = null;
-            this.eraserSubToolbarEl = null;
-            this.eraserBtnEl = null;
-        }
+        if (this.toolbar) { this.toolbar.remove(); this.toolbar = null; }
+        this.strokes = [];
+        this.currentStroke = null;
+        this.active = false;
     }
 
-    private resizeCanvas() {
+    private syncCanvasSize() {
         if (!this.canvas || !this.ctx) return;
         const dpr = window.devicePixelRatio || 1;
         this.canvas.width = window.innerWidth * dpr;
@@ -254,776 +163,424 @@ export default class DraftPaperPlugin extends Plugin {
         this.ctx.scale(dpr, dpr);
     }
 
-    // ==========================================================
-    //  工具栏构建（含橡皮擦子工具栏）
-    // ==========================================================
-    private buildToolbar() {
-        if (!this.toolbarContainer) return;
-        this.toolbarContainer.innerHTML = `
-            <div class="draft-paper-toolbar">
-                <div class="draft-paper-tool-buttons">
-                    <button data-tool="pen" title="画笔 (1)">✏️</button>
-                    <button data-tool="eraser" title="橡皮擦 (2)">🧹</button>
-                    <button data-tool="select" title="框选 (3)">⬜</button>
-                    <button data-tool="arrow" title="箭头 (4)">↗</button>
-                    <button data-tool="rect" title="矩形 (5)">⬛</button>
-                    <button data-tool="text" title="文字 (6)">T</button>
-                </div>
-                <div class="draft-paper-tool-settings">
-                    <input type="color" class="draft-paper-color-picker" value="${this.currentColor}">
-                    <input type="range" class="draft-paper-line-width" min="1" max="8" step="0.5" value="${this.currentLineWidth}">
-                    <span class="draft-paper-line-width-label">${this.currentLineWidth}px</span>
-                    <input type="range" class="draft-paper-opacity" min="10" max="100" step="5" value="${this.currentOpacity * 100}">
-                    <span class="draft-paper-opacity-label">${Math.round(this.currentOpacity * 100)}%</span>
-                    <span class="draft-paper-arrow-style" style="display:${this.toolMode === "arrow" ? "inline" : "none"}">样式: ${this.currentArrowStyle}</span>
-                </div>
-                <div class="draft-paper-mode-buttons">
-                    <button data-mode="DRAW" title="绘图模式">✏️</button>
-                    <button data-mode="POINTER" title="透传模式 (按住 Space 临时切换)">🖱️</button>
-                    <button data-mode="HIDDEN" title="隐藏草稿纸">👁</button>
-                </div>
-                <button class="draft-paper-undo-btn" title="撤销 (Ctrl+Z)">↩</button>
-                <button class="draft-paper-clear-btn" title="清屏 (Ctrl+Shift+Z)">🗑️</button>
+    // ==================== 工具栏 ====================
+    private createToolbar() {
+        const bar = document.createElement("div");
+        bar.id = "draft-paper-toolbar";
+        bar.innerHTML = `
+            <div class="dp-tool-group">
+                <button data-t="pen" class="active" title="画笔 (1)">✏️</button>
+                <button data-t="highlighter" title="荧光笔 (2)">🖍️</button>
+                <button data-t="eraser" title="橡皮擦 (3)">🧹</button>
+                <button data-t="arrow" title="箭头 (4)">↗</button>
+                <button data-t="rect" title="矩形 (5)">⬛</button>
+                <button data-t="text" title="文字 (6)">T</button>
+                <button data-t="hand" title="手掌 (7)">🖐️</button>
+            </div>
+            <div class="dp-style-group">
+                <input type="color" id="dp-color" value="${this.color}" title="颜色">
+                <input type="range" id="dp-width" min="1" max="8" step="0.5" value="${this.lineWidth}" title="粗细">
+                <span id="dp-wlbl">${this.lineWidth}px</span>
+                <input type="range" id="dp-opacity" min="10" max="100" value="${this.opacity * 100}" title="透明度">
+                <span id="dp-olbl">${Math.round(this.opacity * 100)}%</span>
+                <select id="dp-arrow-style" style="display:none">
+                    <option value="straight" selected>→</option>
+                    <option value="curved">↝</option>
+                    <option value="dashed">⇢</option>
+                    <option value="double">↔</option>
+                </select>
+            </div>
+            <div class="dp-mode-group">
+                <button id="dp-mode" class="dp-text-btn">🟢 绘图</button>
+                <button id="dp-undo" title="撤销 (Ctrl+Z)">↩</button>
+                <button id="dp-redo" title="重做 (Ctrl+Shift+Z)">↪</button>
+                <button id="dp-clear" title="清空画布">🗑</button>
+                <button id="dp-exit" title="退出草稿纸">❌</button>
             </div>
         `;
+        document.body.appendChild(bar);
+        this.toolbar = bar;
 
-        // 橡皮擦子工具栏（隐藏状态）
-        this.eraserSubToolbarEl = document.createElement("div");
-        this.eraserSubToolbarEl.className = "draft-paper-eraser-subtoolbar";
-        this.eraserSubToolbarEl.innerHTML = `
-            <button data-eraser="stroke" class="active">整笔删除</button>
-            <button data-eraser="clear-selected">删除选中</button>
-            <button data-eraser="clear-all">清空全部</button>
-        `;
-        this.eraserSubToolbarEl.style.display = "none";
-        this.toolbarContainer.appendChild(this.eraserSubToolbarEl);
-
-        // 获取引用并绑定事件
-        this.eraserBtnEl = this.toolbarContainer.querySelector('[data-tool="eraser"]');
-        this.bindToolbarEvents();
-    }
-
-    private bindToolbarEvents() {
-        // 阻止工具栏容器上的事件冒泡（但不影响子工具栏独立交互）
-        this.toolbarContainer!.addEventListener("pointerdown", e => e.stopPropagation());
-
-        // 工具按钮
-        this.toolbarContainer!.querySelectorAll("[data-tool]").forEach(btn => {
+        bar.querySelectorAll("[data-t]").forEach(btn => {
             btn.addEventListener("click", e => {
                 e.stopPropagation();
-                const tool = (btn as HTMLElement).dataset.tool as ToolMode;
-
+                const tool = (btn as HTMLElement).dataset.t as ToolMode;
                 if (tool === "eraser") {
-                    // 切换子工具栏显示
-                    if (this.toolMode === "eraser") {
-                        const isVisible = this.eraserSubToolbarEl!.style.display !== "none";
-                        this.eraserSubToolbarEl!.style.display = isVisible ? "none" : "flex";
-                    } else {
-                        this.toolMode = "eraser";
-                        this.eraserMode = "stroke";           // 默认整笔删除
-                        this.eraserSubToolbarEl!.style.display = "flex";
-                    }
+                    this.eraserMode = this.eraserMode === "stroke" ? "clear-all" : "stroke";
+                    new Notice(this.eraserMode === "stroke" ? "整笔擦除" : "清空全部");
                 } else {
-                    this.eraserSubToolbarEl!.style.display = "none";
-                    this.toolMode = tool;
+                    this.tool = tool;
+                    this.eraserMode = "stroke";
+                    if (tool === "hand") {
+                        this.canvas!.style.pointerEvents = "none";
+                    } else if (this.isDrawing) {
+                        this.canvas!.style.pointerEvents = "auto";
+                    }
                 }
-
                 this.resetToolState();
                 this.updateToolbarActive();
-                this.canvas?.focus();
             });
         });
 
-        // 橡皮擦子工具
-        this.eraserSubToolbarEl?.querySelectorAll("[data-eraser]").forEach(btn => {
-            btn.addEventListener("click", e => {
-                e.stopPropagation();
-                const mode = (btn as HTMLElement).dataset.eraser as EraserMode;
-                this.eraserMode = mode;
+        document.getElementById("dp-mode")!.onclick = () => this.toggleDrawMode();
+        document.getElementById("dp-undo")!.onclick = () => this.undo();
+        document.getElementById("dp-redo")!.onclick = () => this.redo();
+        document.getElementById("dp-clear")!.onclick = () => this.confirmClearAll();
+        document.getElementById("dp-exit")!.onclick = () => this.disable();
 
-                if (mode === "clear-selected") {
-                    if (this.selectedIndices.size === 0) {
-                        new Notice("没有选中的元素");
-                    } else {
-                        this.deleteSelected();
-                    }
-                } else if (mode === "clear-all") {
-                    this.confirmClearAll();
-                }
-
-                // 隐藏子工具栏，工具保持橡皮擦
-                this.eraserSubToolbarEl!.style.display = "none";
-                this.updateToolbarActive();
-                this.canvas?.focus();
-            });
+        document.getElementById("dp-color")!.addEventListener("input", e => {
+            this.color = (e.target as HTMLInputElement).value;
         });
-
-        // 模式按钮
-        this.toolbarContainer!.querySelectorAll("[data-mode]").forEach(btn => {
-            btn.addEventListener("click", e => {
-                e.stopPropagation();
-                const mode = (btn as HTMLElement).dataset.mode as DraftMode;
-                this.setDraftMode(mode);
-            });
+        document.getElementById("dp-width")!.addEventListener("input", e => {
+            this.lineWidth = parseFloat((e.target as HTMLInputElement).value);
+            document.getElementById("dp-wlbl")!.textContent = `${this.lineWidth}px`;
         });
-
-        // 颜色选择器
-        const colorPicker = this.toolbarContainer!.querySelector(".draft-paper-color-picker") as HTMLInputElement;
-        colorPicker?.addEventListener("input", e => {
-            this.currentColor = (e.target as HTMLInputElement).value;
+        document.getElementById("dp-opacity")!.addEventListener("input", e => {
+            this.opacity = parseInt((e.target as HTMLInputElement).value) / 100;
+            document.getElementById("dp-olbl")!.textContent = `${Math.round(this.opacity * 100)}%`;
         });
-
-        // 线条粗细
-        const widthSlider = this.toolbarContainer!.querySelector(".draft-paper-line-width") as HTMLInputElement;
-        widthSlider?.addEventListener("input", e => {
-            this.currentLineWidth = parseFloat((e.target as HTMLInputElement).value);
-            const lbl = this.toolbarContainer!.querySelector(".draft-paper-line-width-label");
-            if (lbl) lbl.textContent = `${this.currentLineWidth}px`;
-        });
-
-        // 透明度
-        const opacitySlider = this.toolbarContainer!.querySelector(".draft-paper-opacity") as HTMLInputElement;
-        opacitySlider?.addEventListener("input", e => {
-            this.currentOpacity = parseInt((e.target as HTMLInputElement).value) / 100;
-            const lbl = this.toolbarContainer!.querySelector(".draft-paper-opacity-label");
-            if (lbl) lbl.textContent = `${Math.round(this.currentOpacity * 100)}%`;
-        });
-
-        // 撤销
-        this.toolbarContainer!.querySelector(".draft-paper-undo-btn")?.addEventListener("click", e => {
-            e.stopPropagation();
-            this.undo();
-            this.canvas?.focus();
-        });
-
-        // 清屏（直接调用，无确认，因为已有确认逻辑在其他地方）
-        this.toolbarContainer!.querySelector(".draft-paper-clear-btn")?.addEventListener("click", e => {
-            e.stopPropagation();
-            this.confirmClearAll();
+        document.getElementById("dp-arrow-style")!.addEventListener("change", e => {
+            this.arrowStyle = (e.target as HTMLSelectElement).value as ArrowStyle;
         });
     }
 
     private updateToolbarActive() {
-        this.toolbarContainer?.querySelectorAll("[data-tool]").forEach(btn => {
-            btn.classList.toggle("active", (btn as HTMLElement).dataset.tool === this.toolMode);
+        this.toolbar?.querySelectorAll("[data-t]").forEach(btn => {
+            btn.classList.toggle("active", (btn as HTMLElement).dataset.t === this.tool);
         });
-        this.toolbarContainer?.querySelectorAll("[data-mode]").forEach(btn => {
-            btn.classList.toggle("active", (btn as HTMLElement).dataset.mode === this.draftMode);
-        });
-        // 更新橡皮擦子工具高亮
-        this.eraserSubToolbarEl?.querySelectorAll("[data-eraser]").forEach(btn => {
-            btn.classList.toggle("active", (btn as HTMLElement).dataset.eraser === this.eraserMode);
-        });
-        // 箭头样式标签
-        const arrowLabel = this.toolbarContainer?.querySelector(".draft-paper-arrow-style") as HTMLElement | null;
-        if (arrowLabel) {
-            arrowLabel.style.display = this.toolMode === "arrow" ? "inline" : "none";
-            arrowLabel.textContent = `样式: ${this.currentArrowStyle}`;
-        }
-        // 橡皮擦光标显示/隐藏
-        if (this.eraserCursorEl) {
-            const showEraserCursor = this.isActive && this.draftMode === "DRAW" && this.toolMode === "eraser" && this.eraserMode === "stroke";
-            this.eraserCursorEl.style.display = showEraserCursor ? "block" : "none";
-        }
+        const arrowSelect = document.getElementById("dp-arrow-style");
+        if (arrowSelect) arrowSelect.style.display = this.tool === "arrow" ? "inline" : "none";
     }
 
-    // ==========================================================
-    //  模式控制（DRAW / POINTER / HIDDEN）
-    // ==========================================================
-    private setDraftMode(mode: DraftMode) {
-        if (!this.overlay || !this.canvas) return;
-
-        this.draftMode = mode;
-        this.tempPointer = false;
-
-        if (mode === "HIDDEN") {
-            this.exitDraftMode(true);
-            return;
+    private toggleDrawMode() {
+        this.isDrawing = !this.isDrawing;
+        if (this.canvas) {
+            this.canvas.style.pointerEvents = this.isDrawing ? "auto" : "none";
+            this.canvas.style.cursor = this.isDrawing ? "crosshair" : "default";
         }
-
-        // 确保 overlay 可见
-        if (!this.isActive) {
-            this.enterDraftModeSilent();
-        }
-
-        if (mode === "DRAW") {
-            this.overlay.style.pointerEvents = "auto";
-            this.canvas.style.pointerEvents = "auto";
-            this.canvas.style.cursor = this.toolMode === "eraser" ? "none" : (this.toolMode === "text" ? "text" : "crosshair");
-        } else if (mode === "POINTER") {
-            this.overlay.style.pointerEvents = "none";   // 整个 overlay 穿透
-            this.canvas.style.pointerEvents = "none";
-            this.canvas.style.cursor = "default";
-        }
-
-        // 工具栏容器始终可交互，但隐藏状态除外
-        if (this.toolbarContainer) {
-            this.toolbarContainer.style.display = "flex";
-        }
-
-        this.updateToolbarActive();
-        this.renderAllStrokes();
+        this.updateModeUI();
     }
 
-    private enterDraftModeSilent() {
-        if (this.isActive || !this.overlay || !this.canvas) return;
-        this.overlay.style.display = "block";
-        this.resizeCanvas();
-        document.body.style.overflow = "hidden";
-
-        this.canvas.addEventListener("pointerdown", this.boundPointerDown);
-        this.canvas.addEventListener("pointermove", this.boundPointerMove);
-        this.canvas.addEventListener("pointerup", this.boundPointerUp);
-        this.canvas.addEventListener("pointerleave", this.boundPointerUp);
-
-        this.canvas.focus();
-        this.isActive = true;
+    private updateModeUI() {
+        const btn = document.getElementById("dp-mode");
+        if (!btn) return;
+        btn.textContent = this.isDrawing ? "🟢 绘图" : "👁 阅读";
+        if (!this.isDrawing) btn.classList.add("active");
+        else btn.classList.remove("active");
     }
 
-    private exitDraftMode(silent = false) {
-        if (!this.isActive || !this.overlay || !this.canvas) return;
-        if (this.activeStroke) this.finishStroke();
-        this.selectRect = null;
-        this.selectedIndices.clear();
-        this.previewStroke = null;
-        this.lastFilteredPt = null;
-
-        this.overlay.style.display = "none";
-        this.canvas.removeEventListener("pointerdown", this.boundPointerDown);
-        this.canvas.removeEventListener("pointermove", this.boundPointerMove);
-        this.canvas.removeEventListener("pointerup", this.boundPointerUp);
-        this.canvas.removeEventListener("pointerleave", this.boundPointerUp);
-        document.body.style.overflow = "";
-
-        this.isActive = false;
-        this.draftMode = "HIDDEN";
-        this.saveStrokes();
-        if (!silent) new Notice("草稿纸已隐藏");
-    }
-
-    private async toggleDraftMode() {
-        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view) {
-            new Notice("只在 Markdown 视图中可用");
-            return;
-        }
-        if (view.getMode() !== "preview") {
-            (this.app as any).commands.executeCommandById("markdown:toggle-preview");
-            await sleep(200);
-        }
-        if (this.isActive && this.draftMode !== "HIDDEN") {
-            this.setDraftMode("HIDDEN");
-        } else {
-            await this.syncCurrentFile();
-            await this.loadStrokes();
-            this.setDraftMode("DRAW");
-        }
-    }
-
-    // ==========================================================
-    //  工具重置
-    // ==========================================================
     private resetToolState() {
-        this.activeStroke = null;
+        this.currentStroke = null;
         this.previewStroke = null;
-        if (this.toolMode !== "select") {
-            this.selectedIndices.clear();
-            this.selectRect = null;
-        }
-        this.lastFilteredPt = null;
-        this.renderAllStrokes();
+        this.scheduleRedraw();
     }
 
-    // ==========================================================
-    //  键盘事件
-    // ==========================================================
-    private onKeyDown(e: KeyboardEvent) {
-        if (!this.isActive) return;
-
-        const target = e.target as HTMLElement;
-        // 避免干扰 Obsidian 原生输入
-        if (target.closest("input, textarea") || target.isContentEditable) return;
-
-        // Space 临时透传
-        if (e.code === "Space" && this.draftMode === "DRAW" && !this.tempPointer) {
-            e.preventDefault();
-            e.stopPropagation();
-            this.tempPointer = true;
-            this.canvas!.style.pointerEvents = "none";
-            this.canvas!.style.cursor = "default";
-            return;
-        }
-
-        // 数字键切换工具
-        const toolMap: Record<string, ToolMode> = {
-            "1": "pen", "2": "eraser", "3": "select", "4": "arrow", "5": "rect", "6": "text",
-        };
-        if (toolMap[e.key]) {
-            e.preventDefault(); e.stopPropagation();
-            this.toolMode = toolMap[e.key];
-            if (this.toolMode !== "eraser") this.eraserSubToolbarEl!.style.display = "none";
-            this.resetToolState();
-            this.updateToolbarActive();
-            return;
-        }
-
-        // Esc
-        if (e.key === "Escape") {
-            e.preventDefault(); e.stopPropagation();
-            if (this.selectedIndices.size > 0) {
-                this.selectedIndices.clear();
-                this.renderAllStrokes();
-            } else {
-                this.setDraftMode("HIDDEN");
-            }
-            return;
-        }
-
-        // Ctrl+Z 撤销
-        if ((e.ctrlKey || e.metaKey) && e.key === "z") {
-            e.preventDefault(); e.stopPropagation();
-            this.undo();
-            return;
-        }
-
-        // Ctrl+Shift+Z 清屏
-        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "Z") {
-            e.preventDefault(); e.stopPropagation();
-            this.clearAll();
-            return;
-        }
-
-        // Delete 删除选中
-        if ((e.key === "Delete" || e.key === "Backspace") && this.selectedIndices.size > 0) {
-            e.preventDefault(); e.stopPropagation();
-            this.deleteSelected();
-            return;
-        }
-
-        // 箭头样式切换
-        if (this.toolMode === "arrow" && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
-            e.preventDefault();
-            const idx = ARROW_STYLES.indexOf(this.currentArrowStyle);
-            const next = e.key === "ArrowRight"
-                ? (idx + 1) % ARROW_STYLES.length
-                : (idx - 1 + ARROW_STYLES.length) % ARROW_STYLES.length;
-            this.currentArrowStyle = ARROW_STYLES[next];
-            this.updateToolbarActive();
-        }
-    }
-
-    private onKeyUp(e: KeyboardEvent) {
-        if (!this.isActive) return;
-        if (e.code === "Space" && this.tempPointer) {
-            this.tempPointer = false;
-            if (this.draftMode === "DRAW") {
-                this.canvas!.style.pointerEvents = "auto";
-                this.canvas!.style.cursor = this.toolMode === "eraser" ? "none" : (this.toolMode === "text" ? "text" : "crosshair");
-            }
-        }
-    }
-
-    // ==========================================================
-    //  坐标转换
-    // ==========================================================
-    private getCanvasPoint(e: PointerEvent): Point | null {
+    // ==================== 穿透 canvas ====================
+    private getBlockFromPoint(x: number, y: number): HTMLElement | null {
         if (!this.canvas) return null;
-        const rect = this.canvas.getBoundingClientRect();
-        return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        const prevPE = this.canvas.style.pointerEvents;
+        this.canvas.style.pointerEvents = "none";
+        const elem = document.elementFromPoint(x, y);
+        this.canvas.style.pointerEvents = prevPE;
+        if (!elem) return null;
+        return (elem as HTMLElement).closest(BLOCK_SELECTORS) as HTMLElement | null;
     }
 
-    // ==========================================================
-    //  指针事件路由
-    // ==========================================================
-    private onPointerDown(e: PointerEvent) {
-        if (!this.isActive || this.draftMode !== "DRAW") return;
+    // ==================== 事件处理 ====================
+    private onPointerDown = (e: PointerEvent) => {
+        if (!this.active || !this.isDrawing) return;
         if (e.pointerType === "mouse" && e.button !== 0) return;
-        // 排除工具栏（工具栏已独立，但安全起见再过滤）
-        if ((e.target as HTMLElement)?.closest(".draft-paper-toolbar-container")) return;
-
-        this.canvas?.focus();
-        const pt = this.getCanvasPoint(e);
-        if (!pt) return;
-
-        // 文字工具
-        if (this.toolMode === "text") {
-            this.handleTextTool(pt);
-            return;
-        }
-
-        // 橡皮擦工具：根据 eraserMode 决定行为
-        if (this.toolMode === "eraser") {
-            if (this.eraserMode === "stroke") {
-                this.eraserDown(pt);
-            }
-            // clear-selected 和 clear-all 已通过按钮直接执行，不需要额外的拖拽行为
-            return;
-        }
-
-        switch (this.toolMode) {
-            case "pen": this.penDown(pt); break;
-            case "select": this.selectDown(pt); break;
-            case "arrow": this.arrowDown(pt); break;
-            case "rect": this.rectDown(pt); break;
-        }
-    }
-
-    private onPointerMove(e: PointerEvent) {
-        if (!this.isActive || this.draftMode !== "DRAW") return;
         e.preventDefault();
-        const pt = this.getCanvasPoint(e);
-        if (!pt) return;
 
-        // 橡皮擦光标位置更新（仅整笔擦除模式）
-        if (this.toolMode === "eraser" && this.eraserMode === "stroke" && this.eraserCursorEl) {
-            const size = ERASER_CURSOR_SIZE;
-            this.eraserCursorEl.style.left = `${e.clientX - size / 2}px`;
-            this.eraserCursorEl.style.top = `${e.clientY - size / 2}px`;
-            this.eraserCursorEl.style.width = `${size}px`;
-            this.eraserCursorEl.style.height = `${size}px`;
-        }
+        const block = this.getBlockFromPoint(e.clientX, e.clientY);
+        if (!block) return;
 
-        switch (this.toolMode) {
-            case "pen": this.penMove(pt); break;
-            case "eraser": this.eraserMove(pt); break;
-            case "select": this.selectMove(pt); break;
-            case "arrow": this.arrowMove(pt); break;
-            case "rect": this.rectMove(pt); break;
-        }
-    }
+        const rect = block.getBoundingClientRect();
+        const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
-    private onPointerUp(e: PointerEvent) {
-        if (!this.isActive || this.draftMode !== "DRAW") return;
-        const pt = this.getCanvasPoint(e);
-        if (!pt) return;
+        if (this.tool === "hand") return;
 
-        switch (this.toolMode) {
-            case "pen": this.penUp(pt); break;
-            case "eraser": this.eraserUp(pt); break;
-            case "select": this.selectUp(pt); break;
-            case "arrow": this.arrowUp(pt); break;
-            case "rect": this.rectUp(pt); break;
-        }
-    }
-
-    // ==========================================================
-    //  工具实现
-    // ==========================================================
-
-    // ---------- 画笔 (perfect-freehand 平滑) ----------
-    private penDown(pt: Point) {
-        this.lastFilteredPt = pt;
-        this.activeStroke = {
-            points: [pt],
-            color: this.currentColor,
-            lineWidth: this.currentLineWidth,
-            opacity: this.currentOpacity,
-            timestamp: Date.now(),
-            type: "freehand",
-        };
-        this.renderDot(pt);
-    }
-
-    private penMove(pt: Point) {
-        if (!this.activeStroke || !this.lastFilteredPt) return;
-        // 低通滤波
-        const alpha = 0.35;
-        const filtered: Point = {
-            x: this.lastFilteredPt.x + (pt.x - this.lastFilteredPt.x) * alpha,
-            y: this.lastFilteredPt.y + (pt.y - this.lastFilteredPt.y) * alpha,
-        };
-        this.lastFilteredPt = filtered;
-
-        const pts = this.activeStroke.points;
-        const last = pts[pts.length - 1];
-        if (dist(last, filtered) < 1.0) return;
-        pts.push(filtered);
-
-        this.renderAllStrokes();
-    }
-
-    private penUp(_pt: Point) {
-        this.lastFilteredPt = null;
-        if (this.activeStroke) this.finishStroke();
-    }
-
-    private renderDot(pt: Point) {
-        if (!this.ctx) return;
-        this.ctx.save();
-        this.ctx.globalAlpha = this.currentOpacity;
-        this.ctx.fillStyle = this.currentColor;
-        this.ctx.beginPath();
-        this.ctx.arc(pt.x, pt.y, this.currentLineWidth / 2, 0, Math.PI * 2);
-        this.ctx.fill();
-        this.ctx.restore();
-    }
-
-    // ---------- 橡皮擦（整笔删除） ----------
-    private eraserDown(pt: Point) {
-        this.pushUndo();
-        this.eraserDelete(pt);
-    }
-
-    private eraserMove(pt: Point) {
-        this.eraserDelete(pt);
-    }
-
-    private eraserUp(_pt: Point) {
-        this.saveStrokes();
-    }
-
-    private eraserDelete(pt: Point) {
-        const newStrokes = this.strokes.filter(s => pointToStrokeDist(pt, s) > ERASER_HIT_DISTANCE);
-        if (newStrokes.length !== this.strokes.length) {
-            this.strokes = newStrokes;
-            this.selectedIndices.clear();
-            this.renderAllStrokes();
-        }
-    }
-
-    // ---------- 选择工具 ----------
-    private selectDown(pt: Point) {
-        if (this.selectedIndices.size > 0) {
-            const selStrokes = [...this.selectedIndices].map(i => this.strokes[i]);
-            const hit = selStrokes.some(s => s.points.some(p => dist(p, pt) < 8));
-            if (hit) {
-                this.moveStart = pt;
-                this.moveOriginStrokes = selStrokes.map(s => s.points.map(p => ({ ...p })));
-                return;
-            }
-        }
-        this.selectedIndices.clear();
-        this.selectStart = pt;
-        this.selectRect = { x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y };
-    }
-
-    private selectMove(pt: Point) {
-        if (this.moveStart && this.moveOriginStrokes) {
-            const dx = pt.x - this.moveStart.x;
-            const dy = pt.y - this.moveStart.y;
-            const indices = [...this.selectedIndices];
-            for (let j = 0; j < indices.length; j++) {
-                const origPoints = this.moveOriginStrokes[j];
-                const stroke = this.strokes[indices[j]];
-                for (let i = 0; i < stroke.points.length; i++) {
-                    stroke.points[i] = { x: origPoints[i].x + dx, y: origPoints[i].y + dy };
-                }
-            }
-            this.renderAllStrokes();
+        if (this.tool === "eraser") {
+            if (this.eraserMode === "stroke") { this.eraseAt(block, p, rect); }
+            else { this.clearAll(); }
             return;
         }
-        if (this.selectRect) {
-            this.selectRect.x2 = pt.x;
-            this.selectRect.y2 = pt.y;
-            this.renderAllStrokes();
-        }
-    }
 
-    private selectUp(pt: Point) {
-        if (this.moveStart && this.moveOriginStrokes) {
-            const dx = pt.x - this.moveStart.x;
-            const dy = pt.y - this.moveStart.y;
-            if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
-                this.pushUndo();
-                this.saveStrokes();
-            }
-            this.moveStart = null;
-            this.moveOriginStrokes = null;
-            this.renderAllStrokes();
+        if (this.tool === "text") { this.textAt(block, p); return; }
+
+        if (this.tool === "pen" || this.tool === "highlighter") {
+            this.currentStroke = {
+                type: this.tool === "pen" ? "pen" : "highlighter",
+                blockKey: getBlockKey(block),
+                points: [p],
+                color: this.tool === "highlighter" ? HIGHLIGHTER_COLOR : this.color,
+                lineWidth: this.lineWidth,
+                opacity: this.tool === "highlighter" ? HIGHLIGHTER_OPACITY : this.opacity,
+                timestamp: Date.now(),
+            };
+        } else if (this.tool === "arrow" || this.tool === "rect") {
+            this.previewStroke = {
+                type: this.tool,
+                blockKey: getBlockKey(block),
+                points: [p, p],
+                color: this.color,
+                lineWidth: this.lineWidth,
+                opacity: this.opacity,
+                timestamp: Date.now(),
+                arrowStyle: this.tool === "arrow" ? this.arrowStyle : undefined,
+            };
+        }
+        this.scheduleRedraw();
+    };
+
+    private onPointerMove = (e: PointerEvent) => {
+        if (!this.active || !this.isDrawing) return;
+
+        const block = this.getBlockFromPoint(e.clientX, e.clientY);
+        if (!block) return;
+
+        const rect = block.getBoundingClientRect();
+        const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+
+        if (this.tool === "eraser" && this.eraserMode === "stroke" && e.buttons === 1) {
+            this.eraseAt(block, p, rect);
             return;
         }
-        if (this.selectRect) {
-            for (let i = 0; i < this.strokes.length; i++) {
-                if (strokeInRect(this.strokes[i], this.selectRect.x1, this.selectRect.y1, this.selectRect.x2, this.selectRect.y2))
-                    this.selectedIndices.add(i);
-            }
-            this.selectRect = null;
-            this.selectStart = null;
-            this.renderAllStrokes();
-        }
-    }
 
-    // ---------- 箭头 ----------
-    private arrowDown(pt: Point) {
-        this.previewStroke = {
-            points: [pt, pt],
-            color: this.currentColor,
-            lineWidth: this.currentLineWidth,
-            opacity: this.currentOpacity,
-            timestamp: Date.now(),
-            type: "arrow",
-            arrowStyle: this.currentArrowStyle,
+        if (this.previewStroke) {
+            if (getBlockKey(block) !== this.previewStroke.blockKey) return;
+            this.previewStroke.points[1] = p;
+            this.scheduleRedraw();
+            return;
+        }
+
+        if (!this.currentStroke) return;
+        if (getBlockKey(block) !== this.currentStroke.blockKey) return;
+
+        const last = this.currentStroke.points.at(-1)!;
+        const filtered = {
+            x: last.x + (p.x - last.x) * 0.35,
+            y: last.y + (p.y - last.y) * 0.35,
         };
-    }
+        if (dist(filtered, last) < 1) return;
+        this.currentStroke.points.push(filtered);
+        this.scheduleRedraw();
+    };
 
-    private arrowMove(pt: Point) {
-        if (!this.previewStroke) return;
-        this.previewStroke.points[1] = pt;
-        this.renderAllStrokes();
-    }
+    private onPointerUp = () => {
+        if (!this.active || !this.isDrawing) return;
 
-    private arrowUp(pt: Point) {
-        if (!this.previewStroke) return;
-        this.previewStroke.points[1] = pt;
-        if (dist(this.previewStroke.points[0], pt) > 3) {
-            this.pushUndo();
-            this.strokes.push({ ...this.previewStroke, arrowStyle: this.currentArrowStyle });
-            this.saveStrokes();
-        }
-        this.previewStroke = null;
-        this.renderAllStrokes();
-    }
-
-    // ---------- 矩形 ----------
-    private rectDown(pt: Point) {
-        this.previewStroke = {
-            points: [pt, pt],
-            color: this.currentColor,
-            lineWidth: this.currentLineWidth,
-            opacity: this.currentOpacity,
-            timestamp: Date.now(),
-            type: "rect",
-        };
-    }
-
-    private rectMove(pt: Point) {
-        if (!this.previewStroke) return;
-        this.previewStroke.points[1] = pt;
-        this.renderAllStrokes();
-    }
-
-    private rectUp(pt: Point) {
-        if (!this.previewStroke) return;
-        this.previewStroke.points[1] = pt;
-        const [a, b] = this.previewStroke.points;
-        if (Math.abs(b.x - a.x) > 3 || Math.abs(b.y - a.y) > 3) {
-            this.pushUndo();
-            this.strokes.push({ ...this.previewStroke });
-            this.saveStrokes();
-        }
-        this.previewStroke = null;
-        this.renderAllStrokes();
-    }
-
-    // ---------- 文字 ----------
-    private handleTextTool(pt: Point) {
-        const input = document.createElement("textarea");
-        input.style.position = "fixed";
-        input.style.left = `${pt.x}px`;
-        input.style.top = `${pt.y}px`;
-        input.style.zIndex = "10002";
-        input.style.minWidth = "80px";
-        input.style.border = "1px dashed var(--interactive-accent)";
-        input.style.background = "var(--background-primary)";
-        input.style.padding = "4px";
-        input.style.fontSize = "16px";
-        input.style.resize = "both";
-        document.body.appendChild(input);
-        input.focus();
-
-        const cleanup = () => {
-            const text = input.value.trim();
-            input.remove();
-            if (text) {
-                const newStroke: Stroke = {
-                    points: [pt],
-                    color: this.currentColor,
-                    lineWidth: this.currentLineWidth,
-                    opacity: this.currentOpacity,
-                    timestamp: Date.now(),
-                    type: "text",
-                    text,
-                    fontSize: 16,
-                };
+        if (this.previewStroke) {
+            const [a, b] = this.previewStroke.points;
+            if (dist(a, b) > 3) {
                 this.pushUndo();
-                this.strokes.push(newStroke);
-                this.saveStrokes();
-                this.renderAllStrokes();
+                this.strokes.push({ ...this.previewStroke });
             }
-        };
+            this.previewStroke = null;
+            this.scheduleRedraw();
+            this.saveStrokes();
+            return;
+        }
 
-        input.addEventListener("blur", cleanup);
-        input.addEventListener("keydown", (e) => {
-            if (e.key === "Escape") {
-                input.remove();
-            } else if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                cleanup();
+        if (this.currentStroke) {
+            if (this.currentStroke.points.length > 1) {
+                this.pushUndo();
+                this.strokes.push(this.currentStroke);
             }
+            this.currentStroke = null;
+            this.scheduleRedraw();
+            this.saveStrokes();
+            return;
+        }
+    };
+
+    // ==================== 工具 ====================
+    private eraseAt(block: HTMLElement, p: Point, rect: DOMRect) {
+        const key = getBlockKey(block);
+        const absPt = { x: p.x + rect.left, y: p.y + rect.top };
+        this.strokes = this.strokes.filter(s => {
+            if (s.blockKey !== key) return true;
+            return !s.points.some(pt => dist({ x: pt.x + rect.left, y: pt.y + rect.top }, absPt) < ERASER_HIT_DISTANCE);
         });
-    }
-
-    // ---------- 笔画完成 ----------
-    private finishStroke() {
-        if (!this.activeStroke || this.activeStroke.points.length < 2) {
-            this.activeStroke = null;
-            return;
-        }
-        this.pushUndo();
-        this.strokes.push(this.activeStroke);
-        this.activeStroke = null;
+        this.scheduleRedraw();
         this.saveStrokes();
     }
 
-    // ---------- 删除选中 ----------
-    private async deleteSelected() {
-        if (this.selectedIndices.size === 0) return;
-        this.pushUndo();
-        const sorted = [...this.selectedIndices].sort((a, b) => b - a);
-        for (const i of sorted) this.strokes.splice(i, 1);
-        this.selectedIndices.clear();
-        this.renderAllStrokes();
-        await this.saveStrokes();
-    }
-
-    // ---------- 清空全部（保留撤销） ----------
     private clearAll() {
         if (this.strokes.length === 0) return;
         this.pushUndo();
         this.strokes = [];
-        this.selectedIndices.clear();
-        this.renderAllStrokes();
+        this.scheduleRedraw();
         this.saveStrokes();
         new Notice("画布已清空，可按 Ctrl+Z 恢复");
     }
 
-    // 清空确认对话框
     private confirmClearAll() {
         const modal = new Modal(this.app);
-        modal.titleEl.setText("确认清空草稿");
-        modal.contentEl.createEl("p", { text: "是否清空当前文件的所有手写与标注？" });
-        modal.contentEl.createEl("p", { text: "（可通过 Ctrl+Z 恢复）", cls: "mod-warning" });
-
-        const btnContainer = modal.contentEl.createDiv({ cls: "modal-button-container" });
-        const confirmBtn = btnContainer.createEl("button", { text: "确认清空" });
-        const cancelBtn = btnContainer.createEl("button", { text: "取消" });
-
-        confirmBtn.addEventListener("click", () => {
+        modal.titleEl.setText("确认清空");
+        modal.contentEl.createEl("p", { text: "清空当前文件所有批注？" });
+        const btns = modal.contentEl.createDiv();
+        btns.createEl("button", { text: "确认" }).addEventListener("click", () => {
             this.clearAll();
             modal.close();
         });
-        cancelBtn.addEventListener("click", () => modal.close());
+        btns.createEl("button", { text: "取消" }).addEventListener("click", () => modal.close());
         modal.open();
     }
 
-    // ==========================================================
-    //  绘制引擎
-    // ==========================================================
-    private drawPerfectFreehand(ctx: CanvasRenderingContext2D, stroke: Stroke) {
-        if (stroke.points.length < 2) return;
-        const outline = getStroke(
-            stroke.points.map(p => [p.x, p.y] as [number, number]),
-            { ...FREEHAND_OPTIONS, size: stroke.lineWidth * 2.2 }
-        );
-        if (!outline.length) return;
+    private textAt(block: HTMLElement, p: Point) {
+        const rect = block.getBoundingClientRect();
+        const input = document.createElement("textarea");
+        Object.assign(input.style, {
+            position: "fixed",
+            left: `${rect.left + p.x}px`,
+            top: `${rect.top + p.y}px`,
+            zIndex: "10002",
+            minWidth: "80px",
+            border: "1px dashed var(--interactive-accent)",
+            background: "var(--background-primary)",
+            padding: "4px",
+            fontSize: "16px",
+            resize: "both",
+        });
+        document.body.appendChild(input);
+        input.focus();
+
+        const done = () => {
+            const text = input.value.trim();
+            input.remove();
+            if (text) {
+                this.pushUndo();
+                this.strokes.push({
+                    type: "text", blockKey: getBlockKey(block), points: [p],
+                    color: this.color, lineWidth: this.lineWidth,
+                    opacity: this.opacity, timestamp: Date.now(),
+                    text, fontSize: 16,
+                });
+                this.saveStrokes();
+                this.scheduleRedraw();
+            }
+        };
+        input.addEventListener("blur", done);
+        input.addEventListener("keydown", e => {
+            if (e.key === "Escape") input.remove();
+            else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); done(); }
+        });
+    }
+
+    // ==================== 渲染 ====================
+    private scheduleRedraw = () => {
+        if (!this.rafPending) {
+            this.rafPending = true;
+            requestAnimationFrame(() => {
+                this.rafPending = false;
+                this.syncCanvasSize();
+                this.redraw();
+            });
+        }
+    };
+
+    private redraw() {
+        if (!this.ctx || !this.canvas) return;
+        const dpr = window.devicePixelRatio || 1;
+        this.ctx.clearRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
+
+        const blockMap = new Map<string, DOMRect>();
+        document.querySelectorAll(BLOCK_SELECTORS).forEach(el => {
+            const key = getBlockKey(el as HTMLElement);
+            if (key) blockMap.set(key, (el as HTMLElement).getBoundingClientRect());
+        });
+
+        for (const s of this.strokes) {
+            const rect = blockMap.get(s.blockKey);
+            if (rect) this.drawStroke(s, rect);
+        }
+
+        if (this.currentStroke) {
+            const rect = blockMap.get(this.currentStroke.blockKey);
+            if (rect) this.drawStroke(this.currentStroke, rect);
+        }
+
+        if (this.previewStroke) {
+            const rect = blockMap.get(this.previewStroke.blockKey);
+            if (rect) this.drawStroke(this.previewStroke, rect);
+        }
+    }
+
+    private drawStroke(stroke: Stroke, blockRect: DOMRect) {
+        if (!this.ctx || stroke.points.length < 1) return;
+
+        const absPts = stroke.points.map(p => ({ x: p.x + blockRect.left, y: p.y + blockRect.top }));
+
+        if (stroke.type === "pen" || stroke.type === "highlighter") {
+            const outline = getStroke(
+                absPts.map(p => [p.x, p.y] as [number, number]),
+                { ...FREEHAND_OPTIONS, size: stroke.lineWidth * 2.2 }
+            );
+            if (!outline.length) return;
+            const ctx = this.ctx;
+            ctx.save();
+            if (stroke.type === "highlighter") ctx.globalCompositeOperation = "multiply";
+            ctx.globalAlpha = stroke.opacity;
+            ctx.fillStyle = stroke.color;
+            ctx.beginPath();
+            ctx.moveTo(outline[0][0], outline[0][1]);
+            for (let i = 1; i < outline.length; i++) ctx.lineTo(outline[i][0], outline[i][1]);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        } else if (stroke.type === "arrow") {
+            this.drawArrowStroke(stroke, blockRect);
+        } else if (stroke.type === "rect") {
+            const [a, b] = absPts;
+            const ctx = this.ctx;
+            ctx.save();
+            ctx.strokeStyle = stroke.color;
+            ctx.lineWidth = stroke.lineWidth;
+            ctx.globalAlpha = stroke.opacity;
+            ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+            ctx.restore();
+        } else if (stroke.type === "text") {
+            const pt = absPts[0];
+            const ctx = this.ctx;
+            ctx.save();
+            ctx.fillStyle = stroke.color;
+            ctx.globalAlpha = stroke.opacity;
+            ctx.font = `${stroke.fontSize || 16}px sans-serif`;
+            ctx.fillText(stroke.text || "", pt.x, pt.y);
+            ctx.restore();
+        }
+    }
+
+    private drawArrowStroke(stroke: Stroke, blockRect: DOMRect) {
+        if (!this.ctx) return;
+        const [a, b] = stroke.points.map(p => ({ x: p.x + blockRect.left, y: p.y + blockRect.top }));
+        const style = stroke.arrowStyle || "straight";
+        const ctx = this.ctx;
         ctx.save();
-        ctx.globalAlpha = stroke.opacity ?? 1;
-        ctx.fillStyle = stroke.color;
+        ctx.strokeStyle = stroke.color;
+        ctx.lineWidth = stroke.lineWidth;
+        ctx.globalAlpha = stroke.opacity;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+
+        if (style === "dashed") ctx.setLineDash([8, 4]);
         ctx.beginPath();
-        ctx.moveTo(outline[0][0], outline[0][1]);
-        for (let i = 1; i < outline.length; i++) ctx.lineTo(outline[i][0], outline[i][1]);
-        ctx.closePath();
-        ctx.fill();
+        if (style === "curved") {
+            const cx = (a.x + b.x) / 2 + (b.y - a.y) * 0.2;
+            const cy = (a.y + b.y) / 2 - (b.x - a.x) * 0.2;
+            ctx.moveTo(a.x, a.y);
+            ctx.quadraticCurveTo(cx, cy, b.x, b.y);
+        } else {
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const headSize = Math.max(6, stroke.lineWidth * 4);
+        this.drawArrowHead(ctx, a, b, stroke.color, headSize);
+        if (style === "double") this.drawArrowHead(ctx, b, a, stroke.color, headSize);
         ctx.restore();
     }
 
@@ -1046,120 +603,7 @@ export default class DraftPaperPlugin extends Plugin {
         ctx.restore();
     }
 
-    private drawArrowStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
-        if (stroke.points.length < 2) return;
-        const [p1, p2] = stroke.points;
-        const style = stroke.arrowStyle || "straight";
-        ctx.save();
-        ctx.strokeStyle = stroke.color;
-        ctx.lineWidth = stroke.lineWidth;
-        ctx.globalAlpha = stroke.opacity ?? 1;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-
-        if (style === "dashed") ctx.setLineDash([8, 4]);
-        else ctx.setLineDash([]);
-
-        ctx.beginPath();
-        if (style === "curved") {
-            const cx = (p1.x + p2.x) / 2 + (p2.y - p1.y) * 0.2;
-            const cy = (p1.y + p2.y) / 2 - (p2.x - p1.x) * 0.2;
-            ctx.moveTo(p1.x, p1.y);
-            ctx.quadraticCurveTo(cx, cy, p2.x, p2.y);
-        } else {
-            ctx.moveTo(p1.x, p1.y);
-            ctx.lineTo(p2.x, p2.y);
-        }
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // 箭头头部
-        const headSize = Math.max(6, stroke.lineWidth * 4);
-        this.drawArrowHead(ctx, p1, p2, stroke.color, headSize);
-        if (style === "double") {
-            this.drawArrowHead(ctx, p2, p1, stroke.color, headSize);
-        }
-        ctx.restore();
-    }
-
-    private drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke, highlight: boolean) {
-        if (stroke.type === "freehand") {
-            if (highlight) {
-                const xs = stroke.points.map(p => p.x);
-                const ys = stroke.points.map(p => p.y);
-                const minX = Math.min(...xs), maxX = Math.max(...xs);
-                const minY = Math.min(...ys), maxY = Math.max(...ys);
-                ctx.save();
-                ctx.strokeStyle = "#3399ff";
-                ctx.lineWidth = 2;
-                ctx.setLineDash([6, 3]);
-                ctx.strokeRect(minX - 6, minY - 6, maxX - minX + 12, maxY - minY + 12);
-                ctx.setLineDash([]);
-                ctx.restore();
-            }
-            this.drawPerfectFreehand(ctx, stroke);
-        } else if (stroke.type === "arrow") {
-            this.drawArrowStroke(ctx, stroke);
-        } else if (stroke.type === "rect") {
-            const [a, b] = stroke.points;
-            ctx.save();
-            ctx.strokeStyle = stroke.color;
-            ctx.lineWidth = stroke.lineWidth;
-            ctx.globalAlpha = stroke.opacity ?? 1;
-            ctx.beginPath();
-            ctx.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
-            ctx.stroke();
-            ctx.restore();
-        } else if (stroke.type === "text") {
-            ctx.save();
-            ctx.fillStyle = stroke.color;
-            ctx.globalAlpha = stroke.opacity ?? 1;
-            ctx.font = `${stroke.fontSize || 16}px sans-serif`;
-            ctx.fillText(stroke.text || "", stroke.points[0].x, stroke.points[0].y);
-            ctx.restore();
-        }
-
-        if (highlight && stroke.type !== "freehand") {
-            const pts = stroke.points;
-            const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-            const minX = Math.min(...xs), maxX = Math.max(...xs);
-            const minY = Math.min(...ys), maxY = Math.max(...ys);
-            ctx.save();
-            ctx.strokeStyle = "#3399ff";
-            ctx.lineWidth = 2;
-            ctx.setLineDash([6, 3]);
-            ctx.strokeRect(minX - 4, minY - 4, maxX - minX + 8, maxY - minY + 8);
-            ctx.setLineDash([]);
-            ctx.restore();
-        }
-    }
-
-    private renderAllStrokes() {
-        if (!this.ctx || !this.canvas) return;
-        const dpr = window.devicePixelRatio || 1;
-        this.ctx.clearRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
-
-        for (let i = 0; i < this.strokes.length; i++) {
-            this.drawStroke(this.ctx, this.strokes[i], this.selectedIndices.has(i));
-        }
-        if (this.activeStroke) this.drawStroke(this.ctx, this.activeStroke, false);
-        if (this.previewStroke) this.drawStroke(this.ctx, this.previewStroke, false);
-
-        if (this.selectRect) {
-            const { x1, y1, x2, y2 } = this.selectRect;
-            this.ctx.save();
-            this.ctx.strokeStyle = "#3399ff";
-            this.ctx.lineWidth = 1.5;
-            this.ctx.setLineDash([6, 3]);
-            this.ctx.strokeRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
-            this.ctx.setLineDash([]);
-            this.ctx.restore();
-        }
-    }
-
-    // ==========================================================
-    //  存储（同级目录 draft-paper 文件夹）
-    // ==========================================================
+    // ==================== 存储 ====================
     private getDraftDir(): string {
         if (!this.currentFilePath) return "";
         const idx = this.currentFilePath.lastIndexOf("/");
@@ -1175,59 +619,40 @@ export default class DraftPaperPlugin extends Plugin {
     }
 
     private async loadStrokes() {
-        const dir = this.getDraftDir();
-        const fn = this.getDraftFileName();
-        if (!dir || !fn) { this.strokes = []; return; }
-        try {
-            const raw = await this.app.vault.adapter.read(`${dir}/${fn}`);
-            this.strokes = JSON.parse(raw);
-        } catch {
-            this.strokes = [];
-        }
+        if (!this.currentFilePath) { this.strokes = []; return; }
+        const path = `${this.getDraftDir()}/${this.getDraftFileName()}`;
+        try { this.strokes = JSON.parse(await this.app.vault.adapter.read(path)); }
+        catch { this.strokes = []; }
     }
 
     private async saveStrokes() {
-        const dir = this.getDraftDir();
-        const fn = this.getDraftFileName();
-        if (!dir || !fn) return;
-        try { await this.app.vault.adapter.mkdir(dir); } catch { /* 目录已存在 */ }
-        try {
-            await this.app.vault.adapter.write(`${dir}/${fn}`, JSON.stringify(this.strokes));
-        } catch (err) {
-            console.error("[DraftPaper] save failed:", err);
-        }
+        if (!this.currentFilePath) return;
+        const path = `${this.getDraftDir()}/${this.getDraftFileName()}`;
+        try { await this.app.vault.adapter.mkdir(this.getDraftDir()); } catch {}
+        try { await this.app.vault.adapter.write(path, JSON.stringify(this.strokes)); }
+        catch (err) { console.error("草稿保存失败:", err); }
     }
 
-    private async syncCurrentFile() {
-        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view?.file) return;
-        const newPath = view.file.path;
-        if (newPath === this.currentFilePath) return;
-        if (this.currentFilePath) await this.saveStrokes();
-        this.currentFilePath = newPath;
-        this.undoStack = [];
-        this.selectedIndices.clear();
-        this.selectRect = null;
-        await this.loadStrokes();
-        this.activeStroke = null;
-        this.renderAllStrokes();
-    }
-
-    // ==========================================================
-    //  撤销系统
-    // ==========================================================
+    // ==================== 撤销/重做 ====================
     private pushUndo() {
-        this.undoStack.push(
-            this.strokes.map(s => ({ ...s, points: s.points.map(p => ({ ...p })) }))
-        );
+        this.undoStack.push(JSON.parse(JSON.stringify(this.strokes)));
         if (this.undoStack.length > this.MAX_UNDO) this.undoStack.shift();
+        this.redoStack = [];
     }
 
-    private async undo() {
-        if (!this.undoStack.length) return;
+    private undo() {
+        if (this.undoStack.length === 0) return;
+        this.redoStack.push(JSON.parse(JSON.stringify(this.strokes)));
         this.strokes = this.undoStack.pop()!;
-        this.selectedIndices.clear();
-        this.renderAllStrokes();
-        await this.saveStrokes();
+        this.scheduleRedraw();
+        this.saveStrokes();
+    }
+
+    private redo() {
+        if (this.redoStack.length === 0) return;
+        this.undoStack.push(JSON.parse(JSON.stringify(this.strokes)));
+        this.strokes = this.redoStack.pop()!;
+        this.scheduleRedraw();
+        this.saveStrokes();
     }
 }
