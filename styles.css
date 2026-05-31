@@ -126,12 +126,14 @@
     pointer-events: auto;
     z-index: 10002;
     white-space: nowrap;
-    display: flex;
     flex-wrap: nowrap;
     align-items: center;
     width: max-content;
 }
 
+.draft-paper-eraser-subtoolbar.is-open {
+    display: flex;
+}
 
 .draft-paper-eraser-subtoolbar button {
     width: auto;
