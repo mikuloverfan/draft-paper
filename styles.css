@@ -1,8 +1,9 @@
+/* === Canvas (已在容器内，保留基础样式) === */
 #draft-paper-canvas {
     cursor: crosshair;
 }
 
-/* 橡皮擦光标（局部擦除时显示） */
+/* === 橡皮擦光标 === */
 .draft-paper-eraser-cursor {
     position: fixed;
     border: 2px dashed #ff6666;
@@ -12,143 +13,250 @@
     background: rgba(255, 100, 100, 0.12);
 }
 
-/* 工具栏容器：相对定位，作为橡皮擦子工具栏的定位锚点 */
-#draft-paper-toolbar {
+/* ============================================================
+   磁吸浮动工具栏
+   ============================================================ */
+.dp-float-bar {
     position: fixed;
-    bottom: 24px;
-    left: 50%;
-    transform: translateX(-50%);
     z-index: 10001;
     display: flex;
     flex-direction: row;
-    flex-wrap: nowrap;
     align-items: center;
-    gap: 16px;
-    padding: 8px 20px;
+    gap: 4px;
+    padding: 4px 6px;
     background: var(--background-primary);
     border: 1px solid var(--background-modifier-border);
-    border-radius: 16px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    border-radius: 10px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.12);
     user-select: none;
     pointer-events: auto;
+    transition: border-radius 0.15s;
 }
 
-/* 工具栏内的各个分组 */
-.dp-tool-group,
-.dp-style-group,
-.dp-mode-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+/* 竖向模式（吸附到左侧/右侧边缘时） */
+.dp-float-bar.is-vertical {
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px 4px;
+    border-radius: 10px;
 }
 
-/* 工具按钮（仅 emoji） */
-#draft-paper-toolbar > .dp-tool-group button,
-#draft-paper-toolbar > .dp-style-group button,
-#draft-paper-toolbar > .dp-mode-group button {
-    width: 34px;
-    height: 34px;
-    border: none;
-    border-radius: 8px;
-    background: transparent;
-    cursor: pointer;
-    font-size: 16px;
+/* === 拖拽手柄 === */
+.dp-drag-handle {
+    width: 20px;
+    height: 20px;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.15s;
+    cursor: grab;
+    color: var(--text-muted);
+    font-size: 12px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s;
+}
+.dp-drag-handle:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+.dp-float-bar.dragging .dp-drag-handle { cursor: grabbing; }
+
+.dp-float-bar.is-vertical .dp-drag-handle {
+    width: 20px;
+    height: 14px;
 }
 
-#draft-paper-toolbar button:hover {
-    background: var(--background-modifier-hover);
+/* === 分隔线 === */
+.dp-sep {
+    width: 1px;
+    height: 20px;
+    background: var(--background-modifier-border);
+    flex-shrink: 0;
+    margin: 0 2px;
+}
+.dp-float-bar.is-vertical .dp-sep {
+    width: 20px;
+    height: 1px;
+    margin: 2px 0;
 }
 
-#draft-paper-toolbar button.active {
-    background: var(--interactive-accent);
-    color: #fff;
-}
-
-/* 带文字的按钮（绘图/阅读切换），通过更高特异性覆盖宽度 */
-#draft-paper-toolbar #dp-mode {
-    width: auto;
-    min-width: 80px;
-    padding: 0 10px;
-    font-size: 13px;
-    white-space: nowrap;
-}
-
-/* 颜色选择器 */
-#dp-color {
+/* === 工具按钮 === */
+.dp-float-bar .dp-tool-btn {
     width: 30px;
     height: 30px;
     border: none;
-    border-radius: 4px;
-    cursor: pointer;
-}
-
-/* 粗细、透明度滑块 */
-#dp-width,
-#dp-opacity {
-    width: 70px;
-}
-
-/* 数值标签 */
-#dp-wlbl,
-#dp-olbl {
-    font-size: 11px;
-    color: var(--text-muted);
-    min-width: 35px;
-    text-align: center;
-}
-
-/* 箭头样式下拉 */
-#dp-arrow-style {
-    font-size: 14px;
-    padding: 2px 4px;
-}
-
-
-/* 橡皮擦子工具栏：绝对定位在工具栏上方，不参与布局流 */
-.draft-paper-eraser-subtoolbar {
-    position: absolute;
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    margin-bottom: 8px;
-    display: none;
-    flex-direction: row;
-    gap: 4px;
-    padding: 6px 10px;
-    background: var(--background-secondary);
-    border: 1px solid var(--background-modifier-border);
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-    pointer-events: auto;
-    z-index: 10002;
-    white-space: nowrap;
-    flex-wrap: nowrap;
-    align-items: center;
-    width: max-content;
-}
-
-.draft-paper-eraser-subtoolbar.is-open {
-    display: flex;
-}
-
-.draft-paper-eraser-subtoolbar button {
-    width: auto;
-    height: auto;
-    padding: 4px 10px;
-    border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     background: transparent;
-    font-size: 12px;
     cursor: pointer;
-    white-space: nowrap;
-    flex: 0 0 auto;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.12s;
+    padding: 0;
+    line-height: 1;
 }
-
-.draft-paper-eraser-subtoolbar button.active {
+.dp-float-bar .dp-tool-btn:hover {
+    background: var(--background-modifier-hover);
+}
+.dp-float-bar .dp-tool-btn.active {
     background: var(--interactive-accent);
     color: #fff;
 }
+
+/* 图钉（设置面板）按钮 */
+.dp-float-bar .dp-tool-btn.dp-gear-btn {
+    font-size: 15px;
+}
+
+/* === 橡皮擦子模式按钮（在弹出面板中） === */
+.dp-eraser-modes {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+.dp-eraser-modes button {
+    padding: 4px 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: transparent;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.12s;
+}
+.dp-eraser-modes button:hover { background: var(--background-modifier-hover); }
+.dp-eraser-modes button.active { background: var(--interactive-accent); color: #fff; border-color: var(--interactive-accent); }
+
+/* === 设置弹出面板 === */
+.dp-settings-popover {
+    position: fixed;
+    z-index: 10002;
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+    min-width: 200px;
+    max-width: 280px;
+    pointer-events: auto;
+}
+
+.dp-settings-popover.is-visible { display: flex; }
+
+/* 弹出面板中的控件行 */
+.dp-popover-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.dp-popover-row label {
+    flex-shrink: 0;
+    min-width: 28px;
+    text-align: right;
+}
+
+/* 弹出面板中的滑块 */
+.dp-popover-row input[type="range"] {
+    flex: 1;
+    min-width: 60px;
+}
+
+/* 弹出面板中的颜色选择器 */
+.dp-popover-row input[type="color"] {
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+}
+
+/* 弹出面板中的操作按钮行 */
+.dp-popover-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.dp-popover-actions button {
+    padding: 5px 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: transparent;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    transition: background 0.12s;
+}
+.dp-popover-actions button:hover { background: var(--background-modifier-hover); }
+.dp-popover-actions button.active { background: var(--interactive-accent); color: #fff; border-color: var(--interactive-accent); }
+
+/* 弹出面板中的文字按钮（像原来的 dp-mode） */
+.dp-popover-actions .dp-mode-toggle {
+    flex: 1;
+    min-width: 60px;
+    justify-content: center;
+}
+
+/* ============================================================
+   响应式：手机端 (< 500px)
+   ============================================================ */
+@media (max-width: 500px) {
+    .dp-float-bar {
+        gap: 2px;
+        padding: 3px 4px;
+        border-radius: 8px;
+    }
+    .dp-float-bar .dp-tool-btn {
+        width: 28px;
+        height: 28px;
+        font-size: 13px;
+    }
+    .dp-float-bar.is-vertical .dp-tool-btn {
+        width: 28px;
+        height: 28px;
+    }
+    .dp-drag-handle {
+        width: 16px;
+        height: 16px;
+        font-size: 10px;
+    }
+    .dp-sep {
+        margin: 0 1px;
+    }
+
+    /* 手机端隐藏次要工具（在弹出面板中可用） */
+    .dp-float-bar .dp-tool-btn[data-t="arrow"],
+    .dp-float-bar .dp-tool-btn[data-t="rect"],
+    .dp-float-bar .dp-tool-btn[data-t="text"],
+    .dp-float-bar .dp-tool-btn[data-t="hand"] {
+        display: none;
+    }
+    .dp-float-bar .dp-tool-btn.dp-tool-extras {
+        display: flex;
+    }
+
+    .dp-settings-popover {
+        min-width: 180px;
+        max-width: 260px;
+        padding: 10px 12px;
+        gap: 8px;
+    }
+}
+
+/* 桌面端显示所有工具，隐藏 "+" 按钮 */
+@media (min-width: 501px) {
+    .dp-float-bar .dp-tool-btn.dp-tool-extras {
+        display: none;
+    }
+}
+
+/* ============================================================
+   旧的工具栏样式已废弃，保留向后兼容的隐藏规则
+   ============================================================ */
+#draft-paper-toolbar { display: none; }
+.draft-paper-eraser-subtoolbar { display: none; }

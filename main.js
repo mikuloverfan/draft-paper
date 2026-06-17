@@ -238,11 +238,6 @@ var FREEHAND_OPTIONS = {
   start: { taper: 0, cap: true },
   end: { taper: 0, cap: true }
 };
-var BLOCK_SELECTORS = "p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, .math-block, .callout";
-function getBlockKey(el) {
-  var _a;
-  return ((_a = el.textContent) == null ? void 0 : _a.trim().substring(0, 60)) || "";
-}
 function dist(a2, b2) {
   return Math.hypot(a2.x - b2.x, a2.y - b2.y);
 }
@@ -278,12 +273,22 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     __publicField(this, "eraserMode", "stroke");
     __publicField(this, "canvas", null);
     __publicField(this, "ctx", null);
+    __publicField(this, "container", null);
+    // markdown 预览容器
     __publicField(this, "strokes", []);
     __publicField(this, "currentStroke", null);
     __publicField(this, "previewStroke", null);
-    __publicField(this, "toolbar", null);
-    __publicField(this, "eraserSubToolbar", null);
+    __publicField(this, "floatBar", null);
+    // 磁吸浮动工具栏
+    __publicField(this, "settingsPopover", null);
+    // 设置弹出面板
+    __publicField(this, "settingsPanelVisible", false);
     __publicField(this, "eraserCursorEl", null);
+    // 拖拽状态
+    __publicField(this, "toolbarDrag", false);
+    __publicField(this, "toolbarDragStart", { x: 0, y: 0 });
+    __publicField(this, "toolbarDragBarStart", { x: 0, y: 0 });
+    __publicField(this, "toolbarSnap", "bottom");
     __publicField(this, "color", DEFAULT_COLOR);
     __publicField(this, "lineWidth", DEFAULT_LINE_WIDTH);
     __publicField(this, "opacity", 1);
@@ -297,23 +302,52 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     __publicField(this, "undoStack", []);
     __publicField(this, "redoStack", []);
     __publicField(this, "MAX_UNDO", 100);
-    // ==================== 事件处理 ====================
+    __publicField(this, "containerResizeObserver", null);
+    // ==================== 拖拽 + 磁吸 ====================
+    __publicField(this, "onToolbarDragStart", (e2) => {
+      if (!this.floatBar)
+        return;
+      this.toolbarDrag = true;
+      this.floatBar.classList.add("dragging");
+      this.toolbarDragStart = { x: e2.clientX, y: e2.clientY };
+      const rect = this.floatBar.getBoundingClientRect();
+      this.toolbarDragBarStart = { x: rect.left, y: rect.top };
+      e2.preventDefault();
+    });
+    __publicField(this, "onToolbarDragMove", (e2) => {
+      if (!this.toolbarDrag || !this.floatBar)
+        return;
+      const dx = e2.clientX - this.toolbarDragStart.x;
+      const dy = e2.clientY - this.toolbarDragStart.y;
+      const newLeft = this.toolbarDragBarStart.x + dx;
+      const newTop = this.toolbarDragBarStart.y + dy;
+      this.floatBar.style.left = `${newLeft}px`;
+      this.floatBar.style.top = `${newTop}px`;
+      this.floatBar.style.transform = "none";
+      if (this.settingsPanelVisible)
+        this.hideSettingsPanel();
+    });
+    __publicField(this, "onToolbarDragEnd", () => {
+      if (!this.toolbarDrag || !this.floatBar)
+        return;
+      this.toolbarDrag = false;
+      this.floatBar.classList.remove("dragging");
+      this.snapToNearest();
+      this.saveToolbarPosition();
+    });
+    // ==================== 事件处理（canvas-relative 坐标系，无 block 依赖） ====================
     __publicField(this, "onPointerDown", (e2) => {
       if (!this.active || !this.isDrawing)
         return;
       if (e2.pointerType === "mouse" && e2.button !== 0)
         return;
       e2.preventDefault();
-      const block = this.getBlockFromPoint(e2.clientX, e2.clientY);
-      if (!block)
-        return;
-      const rect = block.getBoundingClientRect();
-      const p2 = { x: e2.clientX - rect.left, y: e2.clientY - rect.top };
+      const p2 = this.getCanvasPoint(e2);
       if (this.tool === "hand")
         return;
       if (this.tool === "eraser") {
         if (this.eraserMode === "stroke") {
-          this.eraseAt(block, p2, rect);
+          this.eraseAt(p2);
         } else if (this.eraserMode === "pixel") {
           this.isErasing = true;
           this.eraserPath = [p2];
@@ -325,13 +359,13 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
         return;
       }
       if (this.tool === "text") {
-        this.textAt(block, p2);
+        this.textAt(p2);
         return;
       }
       if (this.tool === "pen" || this.tool === "highlighter") {
         this.currentStroke = {
           type: this.tool === "pen" ? "pen" : "highlighter",
-          blockKey: getBlockKey(block),
+          blockKey: "",
           points: [p2],
           color: this.tool === "highlighter" ? HIGHLIGHTER_COLOR : this.color,
           lineWidth: this.lineWidth,
@@ -341,7 +375,7 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       } else if (this.tool === "arrow" || this.tool === "rect") {
         this.previewStroke = {
           type: this.tool,
-          blockKey: getBlockKey(block),
+          blockKey: "",
           points: [p2, p2],
           color: this.color,
           lineWidth: this.lineWidth,
@@ -355,11 +389,7 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     __publicField(this, "onPointerMove", (e2) => {
       if (!this.active || !this.isDrawing)
         return;
-      const block = this.getBlockFromPoint(e2.clientX, e2.clientY);
-      if (!block)
-        return;
-      const rect = block.getBoundingClientRect();
-      const p2 = { x: e2.clientX - rect.left, y: e2.clientY - rect.top };
+      const p2 = this.getCanvasPoint(e2);
       if (this.tool === "eraser" && this.eraserMode === "pixel" && this.eraserCursorEl) {
         const size = PIXEL_ERASER_RADIUS * 2;
         this.eraserCursorEl.style.left = `${e2.clientX - PIXEL_ERASER_RADIUS}px`;
@@ -369,7 +399,7 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       }
       if (this.tool === "eraser") {
         if (this.eraserMode === "stroke" && e2.buttons === 1) {
-          this.eraseAt(block, p2, rect);
+          this.eraseAt(p2);
         } else if (this.eraserMode === "pixel" && this.isErasing) {
           this.eraserPath.push(p2);
           this.applyPixelEraser();
@@ -381,15 +411,11 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
         return;
       }
       if (this.previewStroke) {
-        if (getBlockKey(block) !== this.previewStroke.blockKey)
-          return;
         this.previewStroke.points[1] = p2;
         this.scheduleRedraw();
         return;
       }
       if (!this.currentStroke)
-        return;
-      if (getBlockKey(block) !== this.currentStroke.blockKey)
         return;
       const last = this.currentStroke.points.at(-1);
       const filtered = {
@@ -441,7 +467,20 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
         return;
       }
     });
-    // ==================== 渲染 ====================
+    // 优化后的 pointerleave：延时检测是否真的离开（断触修复关键）
+    __publicField(this, "leaveTimeout", null);
+    __publicField(this, "LEAVE_TOLERANCE_MS", 150);
+    __publicField(this, "onPointerLeave", (e2) => {
+      if (!this.active || !this.isDrawing)
+        return;
+      if (!this.currentStroke && !this.previewStroke)
+        return;
+      this.leaveTimeout = setTimeout(() => {
+        this.leaveTimeout = null;
+        this.onPointerUp();
+      }, this.LEAVE_TOLERANCE_MS);
+    });
+    // ==================== 渲染（无 blockMap，直接 canvas-relative 绘制） ====================
     __publicField(this, "scheduleRedraw", () => {
       if (!this.rafPending) {
         this.rafPending = true;
@@ -454,14 +493,32 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     });
   }
   async onload() {
+    await this.loadData();
     this.addRibbonIcon("pencil", "\u8349\u7A3F\u7EB8", () => this.toggle());
     this.addCommand({ id: "toggle-draft", name: "\u5207\u6362\u8349\u7A3F\u7EB8", callback: () => this.toggle() });
-    this.registerDomEvent(window, "scroll", this.scheduleRedraw, true);
-    this.registerDomEvent(window, "resize", this.scheduleRedraw);
+    this.registerDomEvent(window, "resize", () => {
+      this.scheduleRedraw();
+      this.repositionPopover();
+    });
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => {
       if (this.active)
         this.scheduleRedraw();
     }));
+  }
+  async loadData() {
+    const data = await super.loadData();
+    if (data == null ? void 0 : data.toolbarPos) {
+      this.toolbarDragBarStart = data.toolbarPos;
+    }
+    if (data == null ? void 0 : data.toolbarSnap) {
+      this.toolbarSnap = data.toolbarSnap;
+    }
+  }
+  async saveData() {
+    await super.saveData({
+      toolbarPos: this.toolbarDragBarStart,
+      toolbarSnap: this.toolbarSnap
+    });
   }
   async onunload() {
     this.disable();
@@ -473,6 +530,7 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       this.enable();
     }
   }
+  // ==================== 启用/初始化 ====================
   enable() {
     var _a;
     if (this.active)
@@ -488,31 +546,43 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       return;
     }
     this.currentFilePath = ((_a = view.file) == null ? void 0 : _a.path) || "";
+    const previewContainer = view.previewEl || view.contentEl.querySelector(".markdown-preview-view");
+    if (!previewContainer) {
+      new import_obsidian.Notice("\u65E0\u6CD5\u627E\u5230\u9884\u89C8\u5BB9\u5668\uFF0C\u8BF7\u786E\u4FDD\u5728\u9605\u8BFB\u6A21\u5F0F");
+      return;
+    }
+    this.container = previewContainer;
     this.loadStrokes();
     this.init();
   }
   init() {
+    if (!this.container)
+      return;
     const canvas = document.createElement("canvas");
     canvas.id = "draft-paper-canvas";
     Object.assign(canvas.style, {
-      position: "fixed",
+      position: "absolute",
       top: "0",
       left: "0",
-      width: "100vw",
-      height: "100vh",
-      zIndex: "5",
+      zIndex: "1",
       pointerEvents: this.isDrawing ? "auto" : "none",
       touchAction: "none",
       background: "transparent"
     });
-    document.body.appendChild(canvas);
+    this.container.appendChild(canvas);
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
     this.syncCanvasSize();
     canvas.addEventListener("pointerdown", this.onPointerDown);
     canvas.addEventListener("pointermove", this.onPointerMove);
     canvas.addEventListener("pointerup", this.onPointerUp);
-    canvas.addEventListener("pointerleave", this.onPointerUp);
+    canvas.addEventListener("pointerleave", this.onPointerLeave);
+    this.containerResizeObserver = new ResizeObserver(() => {
+      this.syncCanvasSize();
+      this.scheduleRedraw();
+    });
+    this.containerResizeObserver.observe(this.container);
+    this.registerDomEvent(this.container, "scroll", this.scheduleRedraw, true);
     this.createToolbar();
     this.eraserCursorEl = document.createElement("div");
     this.eraserCursorEl.className = "draft-paper-eraser-cursor";
@@ -522,7 +592,6 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     this.isDrawing = true;
     this.tool = "pen";
     this.eraserMode = "stroke";
-    this.updateModeUI();
     this.updateCursorVisibility();
     this.scheduleRedraw();
   }
@@ -534,14 +603,23 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       this.canvas.removeEventListener("pointerdown", this.onPointerDown);
       this.canvas.removeEventListener("pointermove", this.onPointerMove);
       this.canvas.removeEventListener("pointerup", this.onPointerUp);
-      this.canvas.removeEventListener("pointerleave", this.onPointerUp);
+      this.canvas.removeEventListener("pointerleave", this.onPointerLeave);
       this.canvas.remove();
       this.canvas = null;
       this.ctx = null;
     }
-    if (this.toolbar) {
-      this.toolbar.remove();
-      this.toolbar = null;
+    if (this.containerResizeObserver) {
+      this.containerResizeObserver.disconnect();
+      this.containerResizeObserver = null;
+    }
+    this.container = null;
+    if (this.floatBar) {
+      this.floatBar.remove();
+      this.floatBar = null;
+    }
+    if (this.settingsPopover) {
+      this.settingsPopover.remove();
+      this.settingsPopover = null;
     }
     if (this.eraserCursorEl) {
       this.eraserCursorEl.remove();
@@ -549,139 +627,319 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     }
     this.strokes = [];
     this.currentStroke = null;
+    this.settingsPanelVisible = false;
     this.active = false;
   }
   syncCanvasSize() {
-    if (!this.canvas || !this.ctx)
+    if (!this.canvas || !this.ctx || !this.container)
       return;
     const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = window.innerWidth * dpr;
-    this.canvas.height = window.innerHeight * dpr;
-    this.canvas.style.width = `${window.innerWidth}px`;
-    this.canvas.style.height = `${window.innerHeight}px`;
+    const containerRect = this.container.getBoundingClientRect();
+    const contentHeight = Math.max(
+      this.container.scrollHeight,
+      this.container.clientHeight
+    );
+    this.canvas.width = containerRect.width * dpr;
+    this.canvas.height = contentHeight * dpr;
+    this.canvas.style.width = `${containerRect.width}px`;
+    this.canvas.style.height = `${contentHeight}px`;
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.scale(dpr, dpr);
   }
-  // ==================== 工具栏 ====================
+  // ==================== 磁吸浮动工具栏 ====================
   createToolbar() {
     const bar = document.createElement("div");
-    bar.id = "draft-paper-toolbar";
+    bar.className = "dp-float-bar";
     bar.innerHTML = `
-            <div class="dp-tool-group">
-                <button data-t="pen" class="active" title="\u753B\u7B14 (1)">\u270F\uFE0F</button>
-                <button data-t="highlighter" title="\u8367\u5149\u7B14 (2)">\u{1F58D}\uFE0F</button>
-                <button data-t="eraser" title="\u6A61\u76AE\u64E6 (3)">\u{1F9F9}</button>
-                <button data-t="arrow" title="\u7BAD\u5934 (4)">\u2197</button>
-                <button data-t="rect" title="\u77E9\u5F62 (5)">\u2B1B</button>
-                <button data-t="text" title="\u6587\u5B57 (6)">T</button>
-                <button data-t="hand" title="\u624B\u638C (7)">\u{1F590}\uFE0F</button>
-            </div>
-            <div class="dp-style-group">
-                <input type="color" id="dp-color" value="${this.color}" title="\u989C\u8272">
-                <input type="range" id="dp-width" min="1" max="8" step="0.5" value="${this.lineWidth}" title="\u7C97\u7EC6">
-                <span id="dp-wlbl">${this.lineWidth}px</span>
-                <input type="range" id="dp-opacity" min="10" max="100" value="${this.opacity * 100}" title="\u900F\u660E\u5EA6">
-                <span id="dp-olbl">${Math.round(this.opacity * 100)}%</span>
-                <select id="dp-arrow-style" style="display:none">
-                    <option value="straight" selected>\u2192</option>
-                    <option value="curved">\u219D</option>
-                    <option value="dashed">\u21E2</option>
-                    <option value="double">\u2194</option>
-                </select>
-            </div>
-            <div class="dp-mode-group">
-                <button id="dp-mode" class="dp-text-btn">\u{1F7E2} \u7ED8\u56FE</button>
-                <button id="dp-undo" title="\u64A4\u9500 (Ctrl+Z)">\u21A9</button>
-                <button id="dp-redo" title="\u91CD\u505A (Ctrl+Shift+Z)">\u21AA</button>
-                <button id="dp-clear" title="\u6E05\u7A7A\u753B\u5E03">\u{1F5D1}</button>
-                <button id="dp-exit" title="\u9000\u51FA\u8349\u7A3F\u7EB8">\u274C</button>
-            </div>
+            <span class="dp-drag-handle" title="\u62D6\u52A8\u79FB\u52A8 (\u677E\u5F00\u5438\u9644)">\u2261</span>
+            <span class="dp-sep"></span>
+            <button class="dp-tool-btn active" data-t="pen" title="\u753B\u7B14 (1)">\u270F\uFE0F</button>
+            <button class="dp-tool-btn" data-t="highlighter" title="\u8367\u5149\u7B14 (2)">\u{1F58D}\uFE0F</button>
+            <button class="dp-tool-btn" data-t="eraser" title="\u6A61\u76AE\u64E6 (3)">\u{1F9F9}</button>
+            <button class="dp-tool-btn" data-t="arrow" title="\u7BAD\u5934 (4)">\u2197</button>
+            <button class="dp-tool-btn" data-t="rect" title="\u77E9\u5F62 (5)">\u2B1B</button>
+            <button class="dp-tool-btn" data-t="text" title="\u6587\u5B57 (6)">T</button>
+            <button class="dp-tool-btn" data-t="hand" title="\u624B\u638C (7)">\u{1F590}\uFE0F</button>
+            <button class="dp-tool-btn dp-tool-extras" title="\u66F4\u591A\u5DE5\u5177">\u2795</button>
+            <span class="dp-sep"></span>
+            <button class="dp-tool-btn dp-gear-btn" title="\u8BBE\u7F6E">\u2699\uFE0F</button>
+            <button class="dp-tool-btn" id="dp-float-exit" title="\u9000\u51FA">\u2715</button>
         `;
     document.body.appendChild(bar);
-    this.toolbar = bar;
-    this.eraserSubToolbar = document.createElement("div");
-    this.eraserSubToolbar.className = "draft-paper-eraser-subtoolbar";
-    this.eraserSubToolbar.innerHTML = `
-            <button data-eraser="pixel" title="\u5C40\u90E8\u64E6\u9664">\u5C40\u90E8\u64E6\u9664</button>
-            <button data-eraser="stroke" class="active" title="\u6574\u7B14\u64E6\u9664">\u6574\u7B14\u64E6\u9664</button>
-            <button data-eraser="select-clear" title="\u6846\u9009\u5220\u9664">\u6846\u9009\u5220\u9664</button>
-        `;
-    this.eraserSubToolbar.style.display = "none";
-    this.toolbar.appendChild(this.eraserSubToolbar);
+    this.floatBar = bar;
+    const handle = bar.querySelector(".dp-drag-handle");
+    handle.addEventListener("pointerdown", this.onToolbarDragStart);
+    window.addEventListener("pointermove", this.onToolbarDragMove);
+    window.addEventListener("pointerup", this.onToolbarDragEnd);
+    bar.addEventListener("pointerdown", (e2) => {
+      if (e2.target.closest("button"))
+        return;
+      this.onToolbarDragStart(e2);
+    });
     bar.querySelectorAll("[data-t]").forEach((btn) => {
       btn.addEventListener("click", (e2) => {
         e2.stopPropagation();
         const tool = btn.dataset.t;
-        if (tool === "eraser") {
-          const wasVisible = this.eraserSubToolbar.style.display !== "none";
-          this.eraserSubToolbar.style.display = wasVisible ? "none" : "flex";
-          if (!wasVisible && this.tool !== "eraser") {
-            this.eraserMode = "stroke";
-          }
-          this.tool = "eraser";
-          this.resetToolState();
-          this.updateCursorVisibility();
-          this.updateEraserSubToolbarActive();
-        } else {
-          this.eraserSubToolbar.style.display = "none";
-          this.tool = tool;
-          this.eraserMode = "stroke";
-          if (tool === "hand") {
-            this.canvas.style.pointerEvents = "none";
-          } else if (this.isDrawing) {
-            this.canvas.style.pointerEvents = "auto";
-          }
-          this.resetToolState();
-          this.updateCursorVisibility();
-        }
-        this.updateToolbarActive();
+        this.selectTool(tool);
+        this.updateFloatBarActive();
       });
     });
-    this.eraserSubToolbar.querySelectorAll("[data-eraser]").forEach((btn) => {
-      btn.addEventListener("click", (e2) => {
-        e2.stopPropagation();
-        const mode = btn.dataset.eraser;
-        this.eraserMode = mode;
-        this.resetToolState();
-        this.updateCursorVisibility();
-        this.updateEraserSubToolbarActive();
-        this.eraserSubToolbar.style.display = "none";
-      });
+    bar.querySelector(".dp-gear-btn").addEventListener("click", (e2) => {
+      e2.stopPropagation();
+      this.toggleSettingsPanel();
     });
-    document.getElementById("dp-mode").onclick = () => this.toggleDrawMode();
-    document.getElementById("dp-undo").onclick = () => this.undo();
-    document.getElementById("dp-redo").onclick = () => this.redo();
-    document.getElementById("dp-clear").onclick = () => this.confirmClearAll();
-    document.getElementById("dp-exit").onclick = () => this.disable();
-    document.getElementById("dp-color").addEventListener("input", (e2) => {
-      this.color = e2.target.value;
+    document.getElementById("dp-float-exit").addEventListener("click", () => this.disable());
+    document.addEventListener("click", (e2) => {
+      var _a, _b;
+      if (this.settingsPanelVisible && !((_a = this.settingsPopover) == null ? void 0 : _a.contains(e2.target)) && !((_b = this.floatBar) == null ? void 0 : _b.contains(e2.target))) {
+        this.hideSettingsPanel();
+      }
     });
-    document.getElementById("dp-width").addEventListener("input", (e2) => {
-      this.lineWidth = parseFloat(e2.target.value);
-      document.getElementById("dp-wlbl").textContent = `${this.lineWidth}px`;
-    });
-    document.getElementById("dp-opacity").addEventListener("input", (e2) => {
-      this.opacity = parseInt(e2.target.value) / 100;
-      document.getElementById("dp-olbl").textContent = `${Math.round(this.opacity * 100)}%`;
-    });
-    document.getElementById("dp-arrow-style").addEventListener("change", (e2) => {
-      this.arrowStyle = e2.target.value;
-    });
+    this.createSettingsPopover();
+    this.updateFloatBarActive();
+    this.applyToolbarPosition();
   }
-  updateToolbarActive() {
+  selectTool(tool) {
+    this.tool = tool;
+    this.eraserMode = "stroke";
+    if (tool === "hand") {
+      this.canvas.style.pointerEvents = "none";
+    } else if (this.isDrawing) {
+      this.canvas.style.pointerEvents = "auto";
+    }
+    this.resetToolState();
+    this.updateCursorVisibility();
+    this.updateSettingsPanelContent();
+  }
+  updateFloatBarActive() {
     var _a;
-    (_a = this.toolbar) == null ? void 0 : _a.querySelectorAll("[data-t]").forEach((btn) => {
+    (_a = this.floatBar) == null ? void 0 : _a.querySelectorAll("[data-t]").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.t === this.tool);
     });
-    const arrowSelect = document.getElementById("dp-arrow-style");
-    if (arrowSelect)
-      arrowSelect.style.display = this.tool === "arrow" ? "inline" : "none";
   }
-  updateEraserSubToolbarActive() {
-    var _a;
-    (_a = this.eraserSubToolbar) == null ? void 0 : _a.querySelectorAll("[data-eraser]").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.eraser === this.eraserMode);
+  snapToNearest() {
+    if (!this.floatBar || !this.container)
+      return;
+    const barRect = this.floatBar.getBoundingClientRect();
+    const cx = barRect.left + barRect.width / 2;
+    const cy = barRect.top + barRect.height / 2;
+    const MARGIN = 8;
+    const SNAP_THRESHOLD = 200;
+    const containerRect = this.container.getBoundingClientRect();
+    const cLeft = containerRect.left;
+    const cRight = containerRect.right;
+    const cTop = containerRect.top;
+    const cBottom = containerRect.bottom;
+    const snaps = [
+      // 底部居中（横向）
+      { id: "bottom", x: (cLeft + cRight - barRect.width) / 2, y: cBottom - barRect.height - MARGIN, vertical: false },
+      // 顶部居中（横向）
+      { id: "top", x: (cLeft + cRight - barRect.width) / 2, y: cTop + MARGIN, vertical: false },
+      // 左侧居中（竖向）
+      { id: "left", x: cLeft + MARGIN, y: (cTop + cBottom - barRect.height) / 2, vertical: true },
+      // 右侧居中（竖向）
+      { id: "right", x: cRight - barRect.width - MARGIN, y: (cTop + cBottom - barRect.height) / 2, vertical: true }
+    ];
+    let best = null;
+    let bestDist = Infinity;
+    for (const s2 of snaps) {
+      const sCx = s2.vertical ? s2.x + barRect.width / 2 : s2.x + barRect.width / 2;
+      const sCy = s2.vertical ? s2.y + barRect.height / 2 : s2.y + barRect.height / 2;
+      const d2 = Math.hypot(cx - sCx, cy - sCy);
+      if (d2 < bestDist) {
+        best = s2;
+        bestDist = d2;
+      }
+    }
+    if (best && bestDist < SNAP_THRESHOLD) {
+      this.floatBar.style.left = `${best.x}px`;
+      this.floatBar.style.top = `${best.y}px`;
+      this.floatBar.style.transform = "none";
+      this.toolbarSnap = best.id;
+      this.floatBar.classList.toggle("is-vertical", best.vertical);
+    } else {
+      this.toolbarSnap = "free";
+      this.floatBar.classList.remove("is-vertical");
+      const r2 = this.floatBar.getBoundingClientRect();
+      this.toolbarDragBarStart = { x: r2.left, y: r2.top };
+    }
+    this.repositionPopover();
+  }
+  applyToolbarPosition() {
+    if (!this.floatBar || !this.container)
+      return;
+    const pos = this.toolbarDragBarStart;
+    const MARGIN = 8;
+    if (pos.x === 0 && pos.y === 0) {
+      const containerRect = this.container.getBoundingClientRect();
+      this.floatBar.style.left = `${MARGIN}px`;
+      this.floatBar.style.top = `${MARGIN}px`;
+      const barRect = this.floatBar.getBoundingClientRect();
+      const x2 = (containerRect.left + containerRect.right - barRect.width) / 2;
+      const y2 = containerRect.bottom - barRect.height - MARGIN;
+      this.floatBar.style.left = `${x2}px`;
+      this.floatBar.style.top = `${y2}px`;
+      this.floatBar.style.transform = "none";
+      this.toolbarDragBarStart = { x: x2, y: y2 };
+      this.saveData();
+    } else {
+      this.floatBar.style.left = `${pos.x}px`;
+      this.floatBar.style.top = `${pos.y}px`;
+      this.floatBar.style.transform = "none";
+    }
+    const isVertical = this.toolbarSnap === "left" || this.toolbarSnap === "right";
+    this.floatBar.classList.toggle("is-vertical", isVertical);
+  }
+  repositionPopover() {
+    if (!this.settingsPopover || !this.floatBar || !this.settingsPanelVisible)
+      return;
+    const barRect = this.floatBar.getBoundingClientRect();
+    const popRect = this.settingsPopover.getBoundingClientRect();
+    let top = barRect.top - popRect.height - 8;
+    let left = barRect.left;
+    if (top < 8)
+      top = barRect.bottom + 8;
+    if (left + popRect.width > window.innerWidth - 8)
+      left = window.innerWidth - popRect.width - 8;
+    if (left < 8)
+      left = 8;
+    this.settingsPopover.style.left = `${left}px`;
+    this.settingsPopover.style.top = `${top}px`;
+  }
+  saveToolbarPosition() {
+    if (!this.floatBar)
+      return;
+    const r2 = this.floatBar.getBoundingClientRect();
+    this.toolbarDragBarStart = { x: r2.left, y: r2.top };
+    this.saveData();
+  }
+  // ==================== 弹出设置面板 ====================
+  createSettingsPopover() {
+    const pop = document.createElement("div");
+    pop.className = "dp-settings-popover";
+    pop.innerHTML = `
+            <div class="dp-popover-row">
+                <input type="color" id="dp-pop-color" value="${this.color}" title="\u989C\u8272">
+                <label>\u7C97\u7EC6</label>
+                <input type="range" id="dp-pop-width" min="1" max="8" step="0.5" value="${this.lineWidth}">
+                <span style="font-size:11px;min-width:28px;text-align:right" id="dp-pop-wlbl">${this.lineWidth}px</span>
+            </div>
+            <div class="dp-popover-row">
+                <label style="min-width:28px;text-align:right">\u900F\u660E</label>
+                <input type="range" id="dp-pop-opacity" min="10" max="100" value="${this.opacity * 100}">
+                <span style="font-size:11px;min-width:28px;text-align:right" id="dp-pop-olbl">${Math.round(this.opacity * 100)}%</span>
+            </div>
+            <div class="dp-popover-row" id="dp-pop-arrow-row" style="display:none">
+                <label>\u7BAD\u5934</label>
+                <select id="dp-pop-arrow-style">
+                    <option value="straight">\u2192 \u76F4\u7EBF</option>
+                    <option value="curved">\u219D \u5F2F\u66F2</option>
+                    <option value="dashed">\u21E2 \u865A\u7EBF</option>
+                    <option value="double">\u2194 \u53CC\u5934</option>
+                </select>
+            </div>
+            <div class="dp-eraser-modes" id="dp-pop-eraser-modes" style="display:none">
+                <button data-eraser="pixel">\u5C40\u90E8\u64E6\u9664</button>
+                <button data-eraser="stroke" class="active">\u6574\u7B14\u64E6\u9664</button>
+                <button data-eraser="select-clear">\u6846\u9009\u5220\u9664</button>
+            </div>
+            <div class="dp-popover-actions">
+                <button class="dp-mode-toggle" id="dp-pop-mode">\u{1F7E2} \u7ED8\u56FE</button>
+                <button id="dp-pop-undo" title="\u64A4\u9500 (Ctrl+Z)">\u21A9 \u64A4\u9500</button>
+                <button id="dp-pop-redo" title="\u91CD\u505A (Ctrl+Shift+Z)">\u21AA \u91CD\u505A</button>
+                <button id="dp-pop-clear" title="\u6E05\u7A7A\u753B\u5E03">\u{1F5D1} \u6E05\u7A7A</button>
+            </div>
+            <div class="dp-popover-actions" id="dp-pop-extra-tools" style="display:none">
+                <button data-t="arrow" title="\u7BAD\u5934 (4)">\u2197 \u7BAD\u5934</button>
+                <button data-t="rect" title="\u77E9\u5F62 (5)">\u2B1B \u77E9\u5F62</button>
+                <button data-t="text" title="\u6587\u5B57 (6)">T \u6587\u5B57</button>
+                <button data-t="hand" title="\u624B\u638C (7)">\u{1F590}\uFE0F \u624B\u638C</button>
+            </div>
+        `;
+    document.body.appendChild(pop);
+    this.settingsPopover = pop;
+    document.getElementById("dp-pop-color").addEventListener("input", (e2) => {
+      this.color = e2.target.value;
     });
+    document.getElementById("dp-pop-width").addEventListener("input", (e2) => {
+      this.lineWidth = parseFloat(e2.target.value);
+      document.getElementById("dp-pop-wlbl").textContent = `${this.lineWidth}px`;
+    });
+    document.getElementById("dp-pop-opacity").addEventListener("input", (e2) => {
+      this.opacity = parseInt(e2.target.value) / 100;
+      document.getElementById("dp-pop-olbl").textContent = `${Math.round(this.opacity * 100)}%`;
+    });
+    document.getElementById("dp-pop-arrow-style").addEventListener("change", (e2) => {
+      this.arrowStyle = e2.target.value;
+    });
+    pop.querySelectorAll("[data-eraser]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this.eraserMode = btn.dataset.eraser;
+        this.updateCursorVisibility();
+        this.updateSettingsPanelContent();
+      });
+    });
+    document.getElementById("dp-pop-mode").addEventListener("click", () => this.toggleDrawMode());
+    document.getElementById("dp-pop-undo").addEventListener("click", () => this.undo());
+    document.getElementById("dp-pop-redo").addEventListener("click", () => this.redo());
+    document.getElementById("dp-pop-clear").addEventListener("click", () => this.confirmClearAll());
+    pop.querySelectorAll("#dp-pop-extra-tools [data-t]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const tool = btn.dataset.t;
+        this.selectTool(tool);
+        this.updateFloatBarActive();
+      });
+    });
+  }
+  toggleSettingsPanel() {
+    if (!this.settingsPopover)
+      return;
+    if (this.settingsPanelVisible) {
+      this.hideSettingsPanel();
+    } else {
+      this.showSettingsPanel();
+    }
+  }
+  showSettingsPanel() {
+    if (!this.settingsPopover)
+      return;
+    this.settingsPanelVisible = true;
+    this.updateSettingsPanelContent();
+    this.settingsPopover.classList.add("is-visible");
+    this.repositionPopover();
+  }
+  hideSettingsPanel() {
+    if (!this.settingsPopover)
+      return;
+    this.settingsPanelVisible = false;
+    this.settingsPopover.classList.remove("is-visible");
+  }
+  updateSettingsPanelContent() {
+    if (!this.settingsPopover)
+      return;
+    const eraserModes = document.getElementById("dp-pop-eraser-modes");
+    if (eraserModes) {
+      eraserModes.style.display = this.tool === "eraser" ? "flex" : "none";
+      eraserModes.querySelectorAll("[data-eraser]").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.eraser === this.eraserMode);
+      });
+    }
+    const arrowRow = document.getElementById("dp-pop-arrow-row");
+    if (arrowRow) {
+      arrowRow.style.display = this.tool === "arrow" ? "flex" : "none";
+      const sel = document.getElementById("dp-pop-arrow-style");
+      if (sel)
+        sel.value = this.arrowStyle;
+    }
+    const modeBtn = document.getElementById("dp-pop-mode");
+    if (modeBtn) {
+      modeBtn.textContent = this.isDrawing ? "\u{1F7E2} \u7ED8\u56FE" : "\u{1F441} \u9605\u8BFB";
+      modeBtn.classList.toggle("active", !this.isDrawing);
+    }
+    const extraTools = document.getElementById("dp-pop-extra-tools");
+    if (extraTools) {
+      extraTools.style.display = window.innerWidth <= 500 ? "flex" : "none";
+    }
   }
   toggleDrawMode() {
     this.isDrawing = !this.isDrawing;
@@ -689,17 +947,7 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       this.canvas.style.pointerEvents = this.isDrawing ? "auto" : "none";
       this.canvas.style.cursor = this.isDrawing ? "crosshair" : "default";
     }
-    this.updateModeUI();
-  }
-  updateModeUI() {
-    const btn = document.getElementById("dp-mode");
-    if (!btn)
-      return;
-    btn.textContent = this.isDrawing ? "\u{1F7E2} \u7ED8\u56FE" : "\u{1F441} \u9605\u8BFB";
-    if (!this.isDrawing)
-      btn.classList.add("active");
-    else
-      btn.classList.remove("active");
+    this.updateSettingsPanelContent();
   }
   updateCursorVisibility() {
     if (this.eraserCursorEl) {
@@ -716,27 +964,19 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     this.selectClearStart = null;
     this.scheduleRedraw();
   }
-  // ==================== 穿透 canvas 获取块元素 ====================
-  getBlockFromPoint(x2, y2) {
-    if (!this.canvas)
-      return null;
-    const prevPE = this.canvas.style.pointerEvents;
-    this.canvas.style.pointerEvents = "none";
-    const elem = document.elementFromPoint(x2, y2);
-    this.canvas.style.pointerEvents = prevPE;
-    if (!elem)
-      return null;
-    return elem.closest(BLOCK_SELECTORS);
+  // ==================== 获取 canvas-relative 坐标 ====================
+  getCanvasPoint(e2) {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      x: e2.clientX - rect.left,
+      y: e2.clientY - rect.top
+    };
   }
-  // ==================== 橡皮实现 ====================
-  eraseAt(block, p2, rect) {
+  // ==================== 橡皮实现（canvas-relative，无 block 依赖） ====================
+  eraseAt(p2) {
     this.pushUndo();
-    const key = getBlockKey(block);
     this.strokes = this.strokes.filter((s2) => {
-      if (s2.blockKey !== key)
-        return true;
-      const absPts = s2.points.map((pt) => ({ x: pt.x + rect.left, y: pt.y + rect.top }));
-      return !absPts.some((apt) => dist(apt, { x: p2.x + rect.left, y: p2.y + rect.top }) < ERASER_HIT_DISTANCE);
+      return !s2.points.some((pt) => dist(pt, p2) < ERASER_HIT_DISTANCE);
     });
     this.scheduleRedraw();
     this.saveStrokes();
@@ -757,31 +997,20 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     const maxX = Math.max(rect.x1, rect.x2);
     const minY = Math.min(rect.y1, rect.y2);
     const maxY = Math.max(rect.y1, rect.y2);
-    const blockMap = /* @__PURE__ */ new Map();
-    document.querySelectorAll(BLOCK_SELECTORS).forEach((el) => {
-      const key = getBlockKey(el);
-      if (key)
-        blockMap.set(key, el.getBoundingClientRect());
-    });
     this.strokes = this.strokes.filter((s2) => {
-      const blockRect = blockMap.get(s2.blockKey);
-      if (!blockRect)
-        return true;
-      return !s2.points.some((pt) => {
-        const absX = pt.x + blockRect.left;
-        const absY = pt.y + blockRect.top;
-        return absX >= minX && absX <= maxX && absY >= minY && absY <= maxY;
-      });
+      return !s2.points.some(
+        (pt) => pt.x >= minX && pt.x <= maxX && pt.y >= minY && pt.y <= maxY
+      );
     });
   }
-  // ==================== 文字工具 ====================
-  textAt(block, p2) {
-    const rect = block.getBoundingClientRect();
+  // ==================== 文字工具（canvas-relative） ====================
+  textAt(p2) {
+    const canvasRect = this.canvas.getBoundingClientRect();
     const input = document.createElement("textarea");
     Object.assign(input.style, {
       position: "fixed",
-      left: `${rect.left + p2.x}px`,
-      top: `${rect.top + p2.y}px`,
+      left: `${canvasRect.left + p2.x}px`,
+      top: `${canvasRect.top + p2.y}px`,
       zIndex: "10002",
       minWidth: "80px",
       border: "1px dashed var(--interactive-accent)",
@@ -799,7 +1028,7 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
         this.pushUndo();
         this.strokes.push({
           type: "text",
-          blockKey: getBlockKey(block),
+          blockKey: "",
           points: [p2],
           color: this.color,
           lineWidth: this.lineWidth,
@@ -849,59 +1078,35 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       return;
     const dpr = window.devicePixelRatio || 1;
     this.ctx.clearRect(0, 0, this.canvas.width / dpr, this.canvas.height / dpr);
-    const blockMap = /* @__PURE__ */ new Map();
-    document.querySelectorAll(BLOCK_SELECTORS).forEach((el) => {
-      const key = getBlockKey(el);
-      if (key)
-        blockMap.set(key, el.getBoundingClientRect());
-    });
     for (const s2 of this.strokes) {
-      const rect = blockMap.get(s2.blockKey);
-      if (rect)
-        this.drawStroke(s2, rect);
+      this.drawStroke(s2);
     }
-    if (this.currentStroke) {
-      const rect = blockMap.get(this.currentStroke.blockKey);
-      if (rect)
-        this.drawStroke(this.currentStroke, rect);
-    }
-    if (this.previewStroke) {
-      const rect = blockMap.get(this.previewStroke.blockKey);
-      if (rect)
-        this.drawStroke(this.previewStroke, rect);
-    }
+    if (this.currentStroke)
+      this.drawStroke(this.currentStroke);
+    if (this.previewStroke)
+      this.drawStroke(this.previewStroke);
     if (this.selectClearRect && this.tool === "eraser" && this.eraserMode === "select-clear") {
-      const anyBlock = document.querySelector(BLOCK_SELECTORS);
-      if (anyBlock) {
-        const bRect = anyBlock.getBoundingClientRect();
-        const absRect = {
-          x1: this.selectClearRect.x1 + bRect.left,
-          y1: this.selectClearRect.y1 + bRect.top,
-          x2: this.selectClearRect.x2 + bRect.left,
-          y2: this.selectClearRect.y2 + bRect.top
-        };
-        this.ctx.save();
-        this.ctx.strokeStyle = "#ff6666";
-        this.ctx.lineWidth = 1.5;
-        this.ctx.setLineDash([6, 3]);
-        this.ctx.strokeRect(
-          Math.min(absRect.x1, absRect.x2),
-          Math.min(absRect.y1, absRect.y2),
-          Math.abs(absRect.x2 - absRect.x1),
-          Math.abs(absRect.y2 - absRect.y1)
-        );
-        this.ctx.setLineDash([]);
-        this.ctx.restore();
-      }
+      this.ctx.save();
+      this.ctx.strokeStyle = "#ff6666";
+      this.ctx.lineWidth = 1.5;
+      this.ctx.setLineDash([6, 3]);
+      this.ctx.strokeRect(
+        Math.min(this.selectClearRect.x1, this.selectClearRect.x2),
+        Math.min(this.selectClearRect.y1, this.selectClearRect.y2),
+        Math.abs(this.selectClearRect.x2 - this.selectClearRect.x1),
+        Math.abs(this.selectClearRect.y2 - this.selectClearRect.y1)
+      );
+      this.ctx.setLineDash([]);
+      this.ctx.restore();
     }
   }
-  drawStroke(stroke, blockRect) {
+  drawStroke(stroke) {
     if (!this.ctx || stroke.points.length < 1)
       return;
-    const absPts = stroke.points.map((p2) => ({ x: p2.x + blockRect.left, y: p2.y + blockRect.top }));
+    const pts = stroke.points;
     if (stroke.type === "pen" || stroke.type === "highlighter") {
       const outline = R(
-        absPts.map((p2) => [p2.x, p2.y]),
+        pts.map((p2) => [p2.x, p2.y]),
         { ...FREEHAND_OPTIONS, size: stroke.lineWidth * 2.2 }
       );
       if (!outline.length)
@@ -920,9 +1125,9 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       ctx.fill();
       ctx.restore();
     } else if (stroke.type === "arrow") {
-      this.drawArrowStroke(stroke, blockRect);
+      this.drawArrowStroke(stroke);
     } else if (stroke.type === "rect") {
-      const [a2, b2] = absPts;
+      const [a2, b2] = pts;
       const ctx = this.ctx;
       ctx.save();
       ctx.strokeStyle = stroke.color;
@@ -931,7 +1136,7 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       ctx.strokeRect(Math.min(a2.x, b2.x), Math.min(a2.y, b2.y), Math.abs(b2.x - a2.x), Math.abs(b2.y - a2.y));
       ctx.restore();
     } else if (stroke.type === "text") {
-      const pt = absPts[0];
+      const pt = pts[0];
       const ctx = this.ctx;
       ctx.save();
       ctx.fillStyle = stroke.color;
@@ -941,10 +1146,10 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
       ctx.restore();
     }
   }
-  drawArrowStroke(stroke, blockRect) {
+  drawArrowStroke(stroke) {
     if (!this.ctx)
       return;
-    const [a2, b2] = stroke.points.map((p2) => ({ x: p2.x + blockRect.left, y: p2.y + blockRect.top }));
+    const [a2, b2] = stroke.points;
     const style = stroke.arrowStyle || "straight";
     const ctx = this.ctx;
     ctx.save();
@@ -1007,16 +1212,55 @@ var DraftPaperPlugin = class extends import_obsidian.Plugin {
     return name.replace(/\.md$/i, ".json");
   }
   async loadStrokes() {
+    var _a, _b;
     if (!this.currentFilePath) {
       this.strokes = [];
       return;
     }
     const path = `${this.getDraftDir()}/${this.getDraftFileName()}`;
     try {
-      this.strokes = JSON.parse(await this.app.vault.adapter.read(path));
+      const raw = JSON.parse(await this.app.vault.adapter.read(path));
+      if (raw.length > 0 && raw[0].blockKey && ((_b = (_a = raw[0].points) == null ? void 0 : _a[0]) == null ? void 0 : _b.x) < 2e3) {
+        this.strokes = await this.migrateOldStrokes(raw);
+      } else {
+        this.strokes = raw;
+      }
     } catch (e2) {
       this.strokes = [];
     }
+  }
+  async migrateOldStrokes(oldStrokes) {
+    if (!this.container)
+      return [];
+    const containerRect = this.container.getBoundingClientRect();
+    const blockMap = /* @__PURE__ */ new Map();
+    const BLOCK_SELECTORS = "p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, .math-block, .callout";
+    document.querySelectorAll(BLOCK_SELECTORS).forEach((el) => {
+      var _a;
+      const key = ((_a = el.textContent) == null ? void 0 : _a.trim().substring(0, 60)) || "";
+      if (key)
+        blockMap.set(key, el.getBoundingClientRect());
+    });
+    const migrated = [];
+    for (const s2 of oldStrokes) {
+      const blockRect = blockMap.get(s2.blockKey);
+      if (!blockRect) {
+        continue;
+      }
+      migrated.push({
+        ...s2,
+        blockKey: s2.blockKey,
+        // 保留兼容
+        points: s2.points.map((p2) => ({
+          x: p2.x + blockRect.left - containerRect.left,
+          y: p2.y + blockRect.top - containerRect.top
+        }))
+      });
+    }
+    if (migrated.length > 0) {
+      new import_obsidian.Notice(`\u5DF2\u8FC1\u79FB ${migrated.length} \u6761\u65E7\u7248\u6279\u6CE8\u5230\u65B0\u5750\u6807\u7CFB`);
+    }
+    return migrated;
   }
   async saveStrokes() {
     if (!this.currentFilePath)
